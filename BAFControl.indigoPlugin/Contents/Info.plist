@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PluginVersion</key>
+    <string>2026.1.0</string>
+    <key>ServerApiVersion</key>
+    <string>3.4</string>
+    <key>CFBundleDisplayName</key>
+    <string>BAF/Haiku Fan i6 Control</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.webdeck.indigoplugin.bafcontrol</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>https://github.com/webdeck/Indigo-BAF-Control</string>
+        </dict>
+    </array>
+</dict>
+</plist>

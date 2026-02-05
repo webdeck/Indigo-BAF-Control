@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Actions>
+    <!-- Actions for the Fan Motor Device (bafFan) -->
+    
+    <!-- Action for Auto Mode On/Off -->
+    <Action id="setFanAutoMode" deviceTypeId="bafFan">
+        <Name>Set Auto Mode</Name>
+        <CallbackMethod>actionSetFanAutoMode</CallbackMethod>
+        <ConfigUI>
+             <Field id="value" type="menu">
+                <Label>Set To:</Label>
+                <List>
+                    <Option value="True">On / Enable</Option>
+                    <Option value="False">Off / Disable</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <!-- Action for Whoosh Mode On/Off -->
+    <Action id="setFanWhooshMode" deviceTypeId="bafFan">
+        <Name>Set Whoosh Mode</Name>
+        <CallbackMethod>actionSetFanWhooshMode</CallbackMethod>
+        <ConfigUI>
+             <Field id="value" type="menu">
+                <Label>Set To:</Label>
+                <List>
+                    <Option value="True">On / Enable</Option>
+                    <Option value="False">Off / Disable</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <!-- Action for Eco Mode On/Off -->
+    <Action id="setFanEcoMode" deviceTypeId="bafFan">
+        <Name>Set Eco Mode</Name>
+        <CallbackMethod>actionSetFanEcoMode</CallbackMethod>
+        <ConfigUI>
+             <Field id="value" type="menu">
+                <Label>Set To:</Label>
+                <List>
+                    <Option value="True">On / Enable</Option>
+                    <Option value="False">Off / Disable</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <!-- Action for Reverse Direction On/Off -->
+    <Action id="setFanReverseMode" deviceTypeId="bafFan">
+        <Name>Set Reverse Direction</Name>
+        <CallbackMethod>actionSetFanReverseMode</CallbackMethod>
+        <ConfigUI>
+             <Field id="value" type="menu">
+                <Label>Set To:</Label>
+                <List>
+                    <Option value="True">On / Enable</Option>
+                    <Option value="False">Off / Disable</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <!-- Actions for the Light Device (bafLight) -->
+    
+    <!-- Standard Indigo Action for Color Temperature (Kelvin values) -->
+    <Action id="controlColorTemperature" deviceTypeId="bafLight">
+        <Name>Set Color Temperature</Name>
+        <CallbackMethod>actionControlColorTemperature</CallbackMethod>
+    </Action>
+    
+    <!-- Custom Action for Light Auto Mode On/Off -->
+    <Action id="setLightMode" deviceTypeId="bafLight">
+        <Name>Set Light Auto Mode</Name>
+        <CallbackMethod>actionSetLightMode</CallbackMethod>
+        <ConfigUI>
+            <Field id="modeType" type="hidden" defaultValue="auto_mode" />
+            <Field id="value" type="menu">
+                <Label>Set To:</Label>
+                <List>
+                    <Option value="True">On / Enable</Option>
+                    <Option value="False">Off / Disable</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+</Actions>

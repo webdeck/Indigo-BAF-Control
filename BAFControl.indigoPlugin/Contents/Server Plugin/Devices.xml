@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Devices>
+    <!-- Fan Motor Device -->
+    <!-- Base icon name is 'fan'. Indigo looks for 'fan-on.png' and 'fan-off.png' -->
+    <Device id="bafFan" type="speedcontrol" icon="fan">
+        <Name>Big Ass Fan (Motor)</Name>
+        <ConfigUI>
+            <Field id="header_label" type="label">
+                <Label>Configure the physical fan's network address.</Label>
+                <Title>Network Configuration</Title>
+            </Field>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>IP Address or Hostname:</Label>
+                <Hint>e.g., 192.168.1.100 or myfan.local</Hint>
+            </Field>
+            <Field id="info_pairing" type="label" fontColor="0xAA0000">
+                <Label>NOTE: You must use the EXACT SAME address for both the Fan and Light devices for them to link correctly.</Label>
+            </Field>
+        </ConfigUI>
+        <States>
+            <!-- These boolean states use custom icon bases -->
+            <State id="auto_mode" icon="auto_mode_motor"><ValueType>Boolean</ValueType></State>
+            <State id="whoosh_mode" icon="whoosh_mode"><ValueType>Boolean</ValueType></State>
+            <State id="reverse" icon="reverse_mode"><ValueType>Boolean</ValueType></State>
+            <State id="eco_mode" icon="eco_mode"><ValueType>Boolean</ValueType></State>
+        </States>
+    </Device>
+
+    <!-- Fan Light Device -->
+    <!-- Base icon name is 'light'. Indigo looks for 'light-on.png' and 'light-off.png' -->
+    <Device id="bafLight" type="dimmer" icon="light">
+        <Name>Big Ass Fan (Light)</Name>
+        <ConfigUI>
+             <Field id="header_label" type="label">
+                <Label>Configure the physical fan's network address (must match the Fan Motor device address).</Label>
+                <Title>Network Configuration</Title>
+            </Field>
+            <Field id="address" type="textfield" defaultValue="">
+                <Label>IP Address or Hostname:</Label>
+                <Hint>e.g., 192.168.1.100 or myfan.local</Hint>
+            </Field>
+             <Field id="info_pairing" type="label" fontColor="0xAA0000">
+                <Label>NOTE: This address must match the Fan Motor device's address.</Label>
+            </Field>
+        </ConfigUI>
+        <States>
+            <!-- onOffState and brightness are standard dimmer states -->
+            <State id="auto_mode" icon="auto_mode_light"><ValueType>Boolean</ValueType></State>
+            <State id="warmth"><ValueType>Integer</ValueType></State>
+        </States>
+    </Device>
+</Devices>
