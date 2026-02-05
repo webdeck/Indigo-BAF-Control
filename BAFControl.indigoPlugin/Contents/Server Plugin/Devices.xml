@@ -1,17 +1,40 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Devices>
-    <!-- NEW: Bridge Device to hold shared config and manage connection -->
+    <!-- Bridge Device to hold shared config and manage connection -->
     <Device id="bafBridge">
         <Name>Big Ass Fan</Name>
         <ConfigUI>
-            <Field id="address" type="textfield">
-                <Label>IP Address or Hostname:</Label>
-                <Hint>e.g., 192.168.1.100 or myfan.local</Hint>
-            </Field>
-            <Field id="hasLight" type="checkbox" defaultValue="true">
-                <Label>Fan has a light attached:</Label>
-                <Title>Light Available</Title>
-            </Field>
+            <!-- Group for Network Discovery/Input -->
+            <UIGroup id="networkGroup">
+                <Title>Network Connection</Title>
+                <Field id="discovery_label" type="label">
+                    <Label>Select an automatically discovered fan from the list, or choose "Manual Input" below.</Label>
+                </Field>
+                <Field id="selected_address_source" type="menu" sort="true" dynamicReload="true">
+                    <Label>Select Fan or Input Method:</Label>
+                    <List class="Plugin" method="getDiscoveredDevices" />
+                </Field>
+
+                <!-- Manual Input Field (only visible when "Manual Input" is selected above) -->
+                <Field id="manual_address" type="textfield">
+                    <Label>Manual Address:</Label>
+                    <Hint>Enter the IP address (e.g., 192.168.1.100) or Hostname (e.g., myfan.local).</Hint>
+                    <VisibilityBindings>
+                        <Binding type="EnableVisibility" uiId="selected_address_source" value="manual" />
+                    </VisibilityBindings>
+                </Field>
+                <!-- This hidden field is populated by plugin.py with the final address -->
+                <Field id="address" type="hidden" />
+            </UIGroup>
+
+            <!-- Group for Hardware Configuration -->
+            <UIGroup id="hardwareGroup">
+                <Title>Hardware Configuration</Title>
+                <Field id="hasLight" type="checkbox" defaultValue="true">
+                    <Label>This physical fan has a light attached:</Label>
+                    <Title>Light Available</Title>
+                </Field>
+            </UIGroup>
         </ConfigUI>
     </Device>
 
@@ -21,7 +44,6 @@
         <ConfigUI>
             <Field id="bridge_id" type="menu">
                 <Label>Select Fan Bridge:</Label>
-                <!-- Links this device to the bafBridge list -->
                 <List class="indigo.devices" filter="bafBridge" />
             </Field>
         </ConfigUI>

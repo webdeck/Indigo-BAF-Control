@@ -12,9 +12,12 @@ with retries.
 """
 
 import asyncio
+import socket
 import threading
 import indigo
 from aiobafi6 import BAFDevice
+from zeroconf import ServiceListener, Zeroconf
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
 # Define constants for clarity and to avoid Pylint 'magic number' warnings
 # Indigo brightness is 0-100. BAF fan speed is 0-7 (approx 14% each step)
@@ -22,8 +25,10 @@ SPEED_SCALE = 100.0 / 7.0
 # BAF light brightness is 0-16 (approx 6.25% each step)
 BRIGHTNESS_SCALE = 100.0 / 16.0
 
+# Global dictionary to store discovered devices for UI population
+DISCOVERED_FANS = {}
 
-class Plugin(indigo.PluginBase):
+class Plugin(indigo.PluginBase, ServiceListener):
     """
     Main Indigo Plugin class responsible for managing BAF devices.
     """
@@ -36,6 +41,9 @@ class Plugin(indigo.PluginBase):
         self.bridge_to_children_map = {}
         # {BRIDGE_DEV_ID: Task_Instance}
         self.reconnect_tasks = {}
+
+        self.azc = None
+        self.browser = None
 
         # Initialize background asyncio loop
         self.loop = asyncio.new_event_loop()
@@ -54,10 +62,25 @@ class Plugin(indigo.PluginBase):
         If it's a bridge, starts supervisor; otherwise, registers child device.
         """
         if dev.deviceTypeId == "bafBridge":
-            ip_address = dev.pluginProps.get("address")
+            # Determine the IP address from the user's selection/input
+            selected_source = dev.pluginProps.get("selected_address_source")
+            if selected_source == "manual":
+                ip_address = dev.pluginProps.get("manual_address")
+            else:
+                # If a discovered device was selected, use that IP as the source
+                ip_address = selected_source
+
             if not ip_address:
-                dev.setErrorStateOnServer("no ip")
+                dev.setErrorStateOnServer("no ip configured")
                 return
+
+            # Store the final resolved address in the 'address' property for consistency
+            if dev.pluginProps.get("address") != ip_address:
+                dev.updateStateOnServer("address", ip_address)
+                props = dev.pluginProps
+                props["address"] = ip_address
+                dev.replacePluginPropsOnServer(props)
+
             self.infoLog(f"Starting bridge communication for '{dev.name}' at {ip_address}")
 
             if dev.id not in self.reconnect_tasks:
@@ -67,6 +90,10 @@ class Plugin(indigo.PluginBase):
             # Initialize map entry for children
             if dev.id not in self.bridge_to_children_map:
                 self.bridge_to_children_map[dev.id] = []
+
+            # Start mDNS discovery service when the first bridge device starts
+            if self.azc is None:
+                asyncio.run_coroutine_threadsafe(self._start_discovery_service(), self.loop)
 
         elif dev.deviceTypeId in ("bafFan", "bafLight"):
             bridge_id_str = dev.pluginProps.get("bridge_id")
@@ -262,6 +289,14 @@ class Plugin(indigo.PluginBase):
             if baf:
                 self.loop.call_soon_threadsafe(baf.async_stop)
 
+            # Also stop discovery services
+            if self.browser:
+                asyncio.run_coroutine_threadsafe(self.browser.async_cancel(), self.loop)
+                self.browser = None
+            if self.azc:
+                asyncio.run_coroutine_threadsafe(self.azc.async_close(), self.loop)
+                self.azc = None
+
         elif dev.deviceTypeId in ("bafFan", "bafLight"):
             # Remove child device from mapping
             bridge_id_str = dev.pluginProps.get("bridge_id")
@@ -271,8 +306,57 @@ class Plugin(indigo.PluginBase):
                     if dev.id in self.bridge_to_children_map[bridge_id]:
                         self.bridge_to_children_map[bridge_id].remove(dev.id)
 
-
     def shutdown(self):
         """Called by Indigo when the plugin is globally disabled."""
         self.infoLog("Plugin shutting down. Stopping background loop.")
+        # Ensure discovery services are stopped on shutdown
+        if self.browser:
+            asyncio.run_coroutine_threadsafe(self.browser.async_cancel(), self.loop)
+        if self.azc:
+            asyncio.run_coroutine_threadsafe(self.azc.async_close(), self.loop)
         self.loop.stop()
+
+    # --- mDNS Discovery Methods ---
+
+    async def _start_discovery_service(self):
+        """Starts the mDNS browser in the background loop."""
+        self.debugLog("Starting mDNS discovery service...")
+        self.azc = AsyncZeroconf()
+        # TODO: Assuming the service type is '_baf_fan._tcp.local.'
+        self.browser = AsyncServiceBrowser(
+          self.azc.zeroconf,
+          "_baf_fan._tcp.local.",
+          handlers=[self]
+        )
+
+    def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+        """Callback when a service is updated (Async method for listener)."""
+        asyncio.run_coroutine_threadsafe(self._async_get_service_info(zc, type_, name), self.loop)
+
+    def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:   # pylint: disable=unused-argument
+        """Callback when a service is removed."""
+        self.debugLog(f"Service {name} removed")
+        if name in DISCOVERED_FANS:
+            del DISCOVERED_FANS[name]
+
+    def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+        """Callback when a new service is found."""
+        asyncio.run_coroutine_threadsafe(self._async_get_service_info(zc, type_, name), self.loop)
+
+    async def _async_get_service_info(self, zc, type_, name):
+        """Retrieves service info asynchronously and updates global list."""
+        info = await zc.get_service_info(type_, name)
+        if info and info.addresses:
+            # Convert binary IP address to string format
+            address = socket.inet_ntoa(info.addresses[0])
+            hostname = info.server.strip('.') if info.server else name
+            DISCOVERED_FANS[name] = {"address": address, "name": hostname}
+            self.debugLog(f"Discovered BAF: {hostname} at {address}")
+
+    def getDiscoveredDevices(self, filter="", valuesDict=None, typeId="", targetId=0):  # pylint: disable=unused-argument, redefined-builtin, invalid-name
+        """Called by Devices.xml to populate the dropdown list in the UI."""
+        device_list = [("manual", "Manual Input (enter IP/Hostname below)")]
+        for _, info in DISCOVERED_FANS.items():
+            device_list.append((info['address'], info['name'] + f" ({info['address']})"))
+        return device_list
+    # --- End mDNS Discovery Methods ---
