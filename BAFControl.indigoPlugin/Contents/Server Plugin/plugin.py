@@ -6,8 +6,9 @@ Indigo Plugin for Big Ass Fans (BAF) i6/Haiku devices.
 
 This plugin bridges Indigo's synchronous Python environment with the
 asynchronous aiobafi6 library using a background asyncio event loop.
-It supports separate Indigo devices for fan motor and light control,
-full status synchronization, and robust error handling with retries.
+It supports separate Indigo devices via a bridge device for fan motor
+and light control, full status synchronization, and robust error handling
+with retries.
 """
 
 import asyncio
@@ -29,9 +30,12 @@ class Plugin(indigo.PluginBase):
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs): # pylint: disable=invalid-name
         """Initialize plugin, data structures, and the async thread."""
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
-        self.active_connections = {}       # {IP: BAFDevice}
-        self.hardware_to_indigo_map = {}   # {IP: [ids]}
-        self.reconnect_tasks = {}          # {IP: Task}
+        # {BRIDGE_DEV_ID: BAFDevice_Instance}
+        self.active_connections = {}
+        # {BRIDGE_DEV_ID: [list_of_child_indigo_device_ids]}
+        self.bridge_to_children_map = {}
+        # {BRIDGE_DEV_ID: Task_Instance}
+        self.reconnect_tasks = {}
 
         # Initialize background asyncio loop
         self.loop = asyncio.new_event_loop()
@@ -47,29 +51,36 @@ class Plugin(indigo.PluginBase):
     def deviceStartComm(self, dev): # pylint: disable=invalid-name
         """
         Called by Indigo when a device is enabled.
-        Configures IP address and starts connection supervisor if needed.
+        If it's a bridge, starts supervisor; otherwise, registers child device.
         """
-        ip_address = dev.pluginProps.get("address")
-        if not ip_address:
-            self.errorLog(f"Device '{dev.name}' configuration error: Missing IP Address.")
-            dev.setErrorStateOnServer("no ip")
-            return
+        if dev.deviceTypeId == "bafBridge":
+            ip_address = dev.pluginProps.get("address")
+            if not ip_address:
+                dev.setErrorStateOnServer("no ip")
+                return
+            self.infoLog(f"Starting bridge communication for '{dev.name}' at {ip_address}")
 
-        self.infoLog(f"Starting communication for '{dev.name}' at {ip_address}")
+            if dev.id not in self.reconnect_tasks:
+                self.reconnect_tasks[dev.id] = asyncio.run_coroutine_threadsafe(
+                    self._connection_supervisor(dev.id, ip_address), self.loop
+                )
+            # Initialize map entry for children
+            if dev.id not in self.bridge_to_children_map:
+                self.bridge_to_children_map[dev.id] = []
 
-        if ip_address not in self.hardware_to_indigo_map:
-            self.hardware_to_indigo_map[ip_address] = []
-        if dev.id not in self.hardware_to_indigo_map[ip_address]:
-            self.hardware_to_indigo_map[ip_address].append(dev.id)
+        elif dev.deviceTypeId in ("bafFan", "bafLight"):
+            bridge_id_str = dev.pluginProps.get("bridge_id")
+            if not bridge_id_str:
+                return
+            bridge_id = int(bridge_id_str)
 
-        # Start supervisor if not already running for this hardware
-        if ip_address not in self.reconnect_tasks:
-            self.debugLog(f"Launching connection supervisor task for {ip_address}")
-            self.reconnect_tasks[ip_address] = asyncio.run_coroutine_threadsafe(
-                self._connection_supervisor(ip_address), self.loop
-            )
+            # Register child device ID with its parent bridge ID
+            if bridge_id in self.bridge_to_children_map:
+                if dev.id not in self.bridge_to_children_map[bridge_id]:
+                    self.bridge_to_children_map[bridge_id].append(dev.id)
+            self.infoLog(f"Child device '{dev.name}' linked to bridge ID {bridge_id}")
 
-    async def _connection_supervisor(self, ip_address):
+    async def _connection_supervisor(self, bridge_id, ip_address):
         """
         Manages hardware connection lifecycle with exponential backoff and logging.
         This task runs forever in the background loop.
@@ -79,26 +90,22 @@ class Plugin(indigo.PluginBase):
 
         while True:
             try:
-                self.debugLog(f"Supervisor: Attempting aiobafi6 connection to {ip_address}")
+                self.debugLog(f"Supervisor: Attempting connection to bridge ID {bridge_id} ({ip_address})") # pylint: disable=line-too-long
                 baf = BAFDevice(ip_address)
 
                 def state_callback(device):
                     """Callback triggered by aiobafi6 when device state changes."""
                     self.debugLog(f"Received update from BAF at {ip_address}")
-                    for dev_id in self.hardware_to_indigo_map.get(ip_address, []):
-                        indigo_dev = indigo.devices.get(dev_id, None)
-                        if indigo_dev:
-                            self._update_indigo_states(indigo_dev, device)
+                    for child_dev_id in self.bridge_to_children_map.get(bridge_id, []):
+                        indigo_child_dev = indigo.devices.get(child_dev_id, None)
+                        if indigo_child_dev:
+                            self._update_indigo_states(indigo_child_dev, device)
 
                 baf.add_callback(state_callback)
-                self.active_connections[ip_address] = baf
+                self.active_connections[bridge_id] = baf
 
                 # Clear error states in Indigo on successful start/reconnect
-                for dev_id in self.hardware_to_indigo_map.get(ip_address, []):
-                    indigo.devices[dev_id].updateStateOnServer(
-                      "onOffState",
-                      indigo.devices[dev_id].onState
-                    )
+                indigo.devices[bridge_id].setErrorStateOnServer(None)
 
                 # Wait for initial data and maintain connection until it drops
                 await baf.async_run()
@@ -108,19 +115,25 @@ class Plugin(indigo.PluginBase):
                 raise Exception("Connection closed") # pylint: disable=broad-exception-raised
 
             except Exception as e: # pylint: disable=broad-exception-caught
-                # Handle connection errors with retry logic
-                self.active_connections.pop(ip_address, None)
-                self.errorLog(f"BAF Connection Error ({ip_address}): {str(e)}")
+                self.active_connections.pop(bridge_id, None)
+                self.errorLog(f"BAF Connection Error (Bridge ID {bridge_id}): {str(e)}")
+                indigo.devices[bridge_id].setErrorStateOnServer("offline")
 
-                # Mark Indigo devices as offline
-                for dev_id in self.hardware_to_indigo_map.get(ip_address, []):
-                    dev = indigo.devices.get(dev_id, None)
-                    if dev:
-                        dev.setErrorStateOnServer("offline")
-
-                self.warnLog(f"Reconnecting to {ip_address} in {backoff} seconds...")
+                self.warnLog(f"Reconnecting to Bridge ID {bridge_id} in {backoff} seconds...")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+
+    def _get_baf_device_from_child(self, dev):
+        """Helper function to find the parent bridge's BAFDevice instance."""
+        bridge_id_str = dev.pluginProps.get("bridge_id")
+        if not bridge_id_str:
+            self.warnLog(f"Device {dev.name} (ID {dev.id}) has no bridge_id set.")
+            return None
+        bridge_id = int(bridge_id_str)
+        baf_device = self.active_connections.get(bridge_id)
+        if not baf_device:
+            self.warnLog(f"Bridge {bridge_id} for device {dev.name} is offline.")
+        return baf_device
 
     def _update_indigo_states(self, dev, baf):
         """Routes BAF hardware properties to specific Indigo device types."""
@@ -150,10 +163,8 @@ class Plugin(indigo.PluginBase):
 
     def actionControlFan(self, action, dev): # pylint: disable=invalid-name
         """Handles standard Indigo Fan actions (On/Off/Speed)."""
-        ip_address = dev.pluginProps.get("address")
-        baf = self.active_connections.get(ip_address)
+        baf = self._get_baf_device_from_child(dev)
         if not baf:
-            self.warnLog(f"Cannot control Fan '{dev.name}': Device is offline.")
             return
 
         self.infoLog(f"Sent Fan command {str(action.deviceAction)} to {dev.name}")
@@ -168,10 +179,15 @@ class Plugin(indigo.PluginBase):
 
     def actionControlDimmerRelay(self, action, dev): # pylint: disable=invalid-name
         """Handles standard Indigo Light actions (On/Off/Brightness)."""
-        ip_address = dev.pluginProps.get("address")
-        baf = self.active_connections.get(ip_address)
+        baf = self._get_baf_device_from_child(dev)
         if not baf:
-            self.warnLog(f"Cannot control Light '{dev.name}': Device is offline.")
+            return
+
+        # Check if the parent bridge is configured to have a light
+        bridge_id_str = dev.pluginProps.get("bridge_id")
+        bridge_dev = indigo.devices[int(bridge_id_str)]
+        if not bridge_dev.pluginProps.get("hasLight", True):
+            self.warnLog(f"User attempted to control light for fan '{dev.name}' which is configured as lightless.") # pylint: disable=line-too-long
             return
 
         self.infoLog(f"Sent Light command {str(action.deviceAction)} to {dev.name}")
@@ -186,10 +202,14 @@ class Plugin(indigo.PluginBase):
 
     def actionControlColorTemperature(self, action, dev): # pylint: disable=invalid-name
         """Handles standard Indigo color temperature action (Kelvin values)."""
-        ip_address = dev.pluginProps.get("address")
-        baf = self.active_connections.get(ip_address)
+        baf = self._get_baf_device_from_child(dev)
         if not baf:
-            self.warnLog(f"Cannot set color temperature for '{dev.name}': Device is offline.")
+            return
+
+        bridge_id_str = dev.pluginProps.get("bridge_id")
+        bridge_dev = indigo.devices[int(bridge_id_str)]
+        if not bridge_dev.pluginProps.get("hasLight", True):
+            self.warnLog(f"User attempted to control light temp for fan '{dev.name}' which is configured as lightless.") # pylint: disable=line-too-long
             return
 
         # Simple linear approximation map from Kelvin (2700-6500) to BAF 0-1000 range
@@ -201,8 +221,7 @@ class Plugin(indigo.PluginBase):
 
     def actionSetFanMode(self, action, dev): # pylint: disable=invalid-name
         """Handles custom menu actions for fan modes (Auto, Whoosh, Eco, Reverse)."""
-        ip_address = dev.pluginProps.get("address")
-        baf = self.active_connections.get(ip_address)
+        baf = self._get_baf_device_from_child(dev)
         if not baf:
             return
 
@@ -221,8 +240,7 @@ class Plugin(indigo.PluginBase):
 
     def actionSetLightMode(self, action, dev): # pylint: disable=invalid-name
         """Handles custom menu actions for light modes (currently only Auto Mode)."""
-        ip_address = dev.pluginProps.get("address")
-        baf = self.active_connections.get(ip_address)
+        baf = self._get_baf_device_from_child(dev)
         if not baf:
             return
 
@@ -233,18 +251,26 @@ class Plugin(indigo.PluginBase):
 
     def deviceStopComm(self, dev): # pylint: disable=invalid-name
         """Called by Indigo when a device is disabled, handles cleanup."""
-        ip_address = dev.pluginProps.get("address")
-        if ip_address in self.hardware_to_indigo_map:
-            self.hardware_to_indigo_map[ip_address].remove(dev.id)
-            if not self.hardware_to_indigo_map[ip_address]:
-                self.infoLog(f"No active devices for {ip_address}. Shutting down connection.")
-                # Cancel the supervisor task and close the BAF connection
-                task = self.reconnect_tasks.pop(ip_address, None)
-                if task:
-                    task.cancel()
-                baf = self.active_connections.pop(ip_address, None)
-                if baf:
-                    self.loop.call_soon_threadsafe(baf.async_stop)
+        if dev.deviceTypeId == "bafBridge":
+            # Clean up bridge-specific resources when bridge is stopped
+            self.infoLog(f"Stopping bridge communication for {dev.name}")
+            self.bridge_to_children_map.pop(dev.id, None)
+            task = self.reconnect_tasks.pop(dev.id, None)
+            if task:
+                task.cancel()
+            baf = self.active_connections.pop(dev.id, None)
+            if baf:
+                self.loop.call_soon_threadsafe(baf.async_stop)
+
+        elif dev.deviceTypeId in ("bafFan", "bafLight"):
+            # Remove child device from mapping
+            bridge_id_str = dev.pluginProps.get("bridge_id")
+            if bridge_id_str:
+                bridge_id = int(bridge_id_str)
+                if bridge_id in self.bridge_to_children_map:
+                    if dev.id in self.bridge_to_children_map[bridge_id]:
+                        self.bridge_to_children_map[bridge_id].remove(dev.id)
+
 
     def shutdown(self):
         """Called by Indigo when the plugin is globally disabled."""

@@ -1,20 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Devices>
-    <!-- Fan Motor Device -->
-    <!-- Base icon name is 'fan'. Indigo looks for 'fan-on.png' and 'fan-off.png' -->
-    <Device id="bafFan" type="speedcontrol" icon="fan">
-        <Name>Big Ass Fan (Motor)</Name>
+    <!-- NEW: Bridge Device to hold shared config and manage connection -->
+    <Device id="bafBridge">
+        <Name>Big Ass Fan</Name>
         <ConfigUI>
-            <Field id="header_label" type="label">
-                <Label>Configure the physical fan's network address.</Label>
-                <Title>Network Configuration</Title>
-            </Field>
-            <Field id="address" type="textfield" defaultValue="">
+            <Field id="address" type="textfield">
                 <Label>IP Address or Hostname:</Label>
                 <Hint>e.g., 192.168.1.100 or myfan.local</Hint>
             </Field>
-            <Field id="info_pairing" type="label" fontColor="0xAA0000">
-                <Label>NOTE: You must use the EXACT SAME address for both the Fan and Light devices for them to link correctly.</Label>
+            <Field id="hasLight" type="checkbox" defaultValue="true">
+                <Label>Fan has a light attached:</Label>
+                <Title>Light Available</Title>
+            </Field>
+        </ConfigUI>
+    </Device>
+
+    <!-- Fan Motor Device (Child) -->
+    <Device id="bafFan" type="speedcontrol" icon="fan">
+        <Name>Big Ass Fan (Motor)</Name>
+        <ConfigUI>
+            <Field id="bridge_id" type="menu">
+                <Label>Select Fan Bridge:</Label>
+                <!-- Links this device to the bafBridge list -->
+                <List class="indigo.devices" filter="bafBridge" />
             </Field>
         </ConfigUI>
         <States>
@@ -26,21 +34,14 @@
         </States>
     </Device>
 
-    <!-- Fan Light Device -->
-    <!-- Base icon name is 'light'. Indigo looks for 'light-on.png' and 'light-off.png' -->
+    <!-- Fan Light Device (Child) -->
     <Device id="bafLight" type="dimmer" icon="light">
         <Name>Big Ass Fan (Light)</Name>
-        <ConfigUI>
-             <Field id="header_label" type="label">
-                <Label>Configure the physical fan's network address (must match the Fan Motor device address).</Label>
-                <Title>Network Configuration</Title>
-            </Field>
-            <Field id="address" type="textfield" defaultValue="">
-                <Label>IP Address or Hostname:</Label>
-                <Hint>e.g., 192.168.1.100 or myfan.local</Hint>
-            </Field>
-             <Field id="info_pairing" type="label" fontColor="0xAA0000">
-                <Label>NOTE: This address must match the Fan Motor device's address.</Label>
+        <!-- Visible only if parent bridge has a light -->
+        <ConfigUI visibleBindingId="bafBridge" visibleBindingProperty="hasLight">
+            <Field id="bridge_id" type="menu">
+                <Label>Select Fan Bridge:</Label>
+                <List class="indigo.devices" filter="bafBridge" />
             </Field>
         </ConfigUI>
         <States>
