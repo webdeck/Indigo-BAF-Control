@@ -15,27 +15,26 @@ import asyncio
 import socket
 import threading
 import indigo
-from aiobafi6 import BAFDevice
-from zeroconf import ServiceListener, Zeroconf
+from aiobafi6 import Device
 from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 
-# Define constants for clarity and to avoid Pylint 'magic number' warnings
 # Indigo brightness is 0-100. BAF fan speed is 0-7 (approx 14% each step)
 SPEED_SCALE = 100.0 / 7.0
 # BAF light brightness is 0-16 (approx 6.25% each step)
 BRIGHTNESS_SCALE = 100.0 / 16.0
 
-# Global dictionary to store discovered devices for UI population
+# Global dictionary to store verified devices from mDNS: {Service_Name: {address, display}}
 DISCOVERED_FANS = {}
 
-class Plugin(indigo.PluginBase, ServiceListener):
+
+class Plugin(indigo.PluginBase):
     """
     Main Indigo Plugin class responsible for managing BAF devices.
     """
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs): # pylint: disable=invalid-name
         """Initialize plugin, data structures, and the async thread."""
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
-        # {BRIDGE_DEV_ID: BAFDevice_Instance}
+        # {BRIDGE_DEV_ID: Device_Instance}
         self.active_connections = {}
         # {BRIDGE_DEV_ID: [list_of_child_indigo_device_ids]}
         self.bridge_to_children_map = {}
@@ -56,60 +55,57 @@ class Plugin(indigo.PluginBase, ServiceListener):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def deviceStartComm(self, dev): # pylint: disable=invalid-name
-        """
-        Called by Indigo when a device is enabled.
-        If it's a bridge, starts supervisor; otherwise, registers child device.
-        """
-        if dev.deviceTypeId == "bafBridge":
-            # Determine the IP address from the user's selection/input
-            selected_source = dev.pluginProps.get("selected_address_source")
-            if selected_source == "manual":
-                ip_address = dev.pluginProps.get("manual_address")
-            else:
-                # If a discovered device was selected, use that IP as the source
-                ip_address = selected_source
+    def _validate_address(self, address):
+        """Checks if a hostname or IP address is reachable via DNS."""
+        try:
+            socket.gethostbyname(address)
+            return True
+        except socket.gaierror:
+            return False
 
+    def deviceStartComm(self, dev): # pylint: disable=invalid-name
+        """Called by Indigo when a device is enabled."""
+        if dev.deviceTypeId == "bafBridge":
+            # Determine address from UI (Manual vs Discovery)
+            ip_address = dev.pluginProps.get("selected_address_source")
+            if ip_address == "manual":
+                ip_address = dev.pluginProps.get("manual_address")
             if not ip_address:
-                dev.setErrorStateOnServer("no ip configured")
                 return
 
-            # Store the final resolved address in the 'address' property for consistency
+            # Validate address resolution
+            if not ip_address or not self._validate_address(ip_address):
+                dev.setErrorStateOnServer("invalid address")
+                self.errorLog(f"Device '{dev.name}' has an unresolvable address: {ip_address}")
+                return
+
+            # Cache the resolved address
             if dev.pluginProps.get("address") != ip_address:
-                dev.updateStateOnServer("address", ip_address)
                 props = dev.pluginProps
                 props["address"] = ip_address
                 dev.replacePluginPropsOnServer(props)
 
             self.infoLog(f"Starting bridge communication for '{dev.name}' at {ip_address}")
 
+            # Start connection supervisor
             if dev.id not in self.reconnect_tasks:
                 self.reconnect_tasks[dev.id] = asyncio.run_coroutine_threadsafe(
                     self._connection_supervisor(dev.id, ip_address), self.loop
                 )
-            # Initialize map entry for children
-            if dev.id not in self.bridge_to_children_map:
-                self.bridge_to_children_map[dev.id] = []
 
-            # Start mDNS discovery service when the first bridge device starts
+            # Start mDNS Browser once
             if self.azc is None:
                 asyncio.run_coroutine_threadsafe(self._start_discovery_service(), self.loop)
 
         elif dev.deviceTypeId in ("bafFan", "bafLight"):
             bridge_id_str = dev.pluginProps.get("bridge_id")
-            if not bridge_id_str:
-                return
-            bridge_id = int(bridge_id_str)
-
-            # Register child device ID with its parent bridge ID
-            if bridge_id in self.bridge_to_children_map:
-                if dev.id not in self.bridge_to_children_map[bridge_id]:
-                    self.bridge_to_children_map[bridge_id].append(dev.id)
-            self.infoLog(f"Child device '{dev.name}' linked to bridge ID {bridge_id}")
+            if bridge_id_str:
+                bridge_id = int(bridge_id_str)
+                self.bridge_to_children_map.setdefault(bridge_id, []).append(dev.id)
 
     async def _connection_supervisor(self, bridge_id, ip_address):
         """
-        Manages hardware connection lifecycle with exponential backoff and logging.
+        Manages hardware connection lifecycle with exponential backoff.
         This task runs forever in the background loop.
         """
         backoff = 5.0
@@ -118,15 +114,19 @@ class Plugin(indigo.PluginBase, ServiceListener):
         while True:
             try:
                 self.debugLog(f"Supervisor: Attempting connection to bridge ID {bridge_id} ({ip_address})") # pylint: disable=line-too-long
-                baf = BAFDevice(ip_address)
+                baf = Device(ip_address)
 
                 def state_callback(device):
-                    """Callback triggered by aiobafi6 when device state changes."""
-                    self.debugLog(f"Received update from BAF at {ip_address}")
-                    for child_dev_id in self.bridge_to_children_map.get(bridge_id, []):
-                        indigo_child_dev = indigo.devices.get(child_dev_id, None)
-                        if indigo_child_dev:
-                            self._update_indigo_states(indigo_child_dev, device)
+                    # Update Bridge visibility state based on hardware discovery
+                    bridge_dev = indigo.devices.get(bridge_id)
+                    if bridge_dev:
+                        bridge_dev.updateStateOnServer("has_light_hardware", device.has_light)
+
+                    # Update children
+                    for child_id in self.bridge_to_children_map.get(bridge_id, []):
+                        child_dev = indigo.devices.get(child_id)
+                        if child_dev:
+                            self._update_indigo_states(child_dev, device)
 
                 baf.add_callback(state_callback)
                 self.active_connections[bridge_id] = baf
@@ -136,9 +136,6 @@ class Plugin(indigo.PluginBase, ServiceListener):
 
                 # Wait for initial data and maintain connection until it drops
                 await baf.async_run()
-
-                # If async_run returns without exception, the connection was lost gracefully
-                self.warnLog(f"BAF connection at {ip_address} was closed cleanly.")
                 raise Exception("Connection closed") # pylint: disable=broad-exception-raised
 
             except Exception as e: # pylint: disable=broad-exception-caught
@@ -151,16 +148,11 @@ class Plugin(indigo.PluginBase, ServiceListener):
                 backoff = min(backoff * 2, max_backoff)
 
     def _get_baf_device_from_child(self, dev):
-        """Helper function to find the parent bridge's BAFDevice instance."""
+        """Helper function to find the parent bridge's Device instance."""
         bridge_id_str = dev.pluginProps.get("bridge_id")
         if not bridge_id_str:
-            self.warnLog(f"Device {dev.name} (ID {dev.id}) has no bridge_id set.")
             return None
-        bridge_id = int(bridge_id_str)
-        baf_device = self.active_connections.get(bridge_id)
-        if not baf_device:
-            self.warnLog(f"Bridge {bridge_id} for device {dev.name} is offline.")
-        return baf_device
+        return self.active_connections.get(int(bridge_id_str))
 
     def _update_indigo_states(self, dev, baf):
         """Routes BAF hardware properties to specific Indigo device types."""
@@ -177,7 +169,7 @@ class Plugin(indigo.PluginBase, ServiceListener):
                     {'key': 'eco_mode', 'value': baf.eco_mode_on},
                     {'key': 'reverse', 'value': baf.reverse_direction_on}
                 ])
-            elif dev.deviceTypeId == "bafLight":
+            elif dev.deviceTypeId == "bafLight" and baf.has_light:
                 dev.updateStatesOnServer([
                     {'key': 'onOffState', 'value': baf.light_on},
                     {'key': 'brightness',
@@ -188,6 +180,38 @@ class Plugin(indigo.PluginBase, ServiceListener):
         except Exception as e: # pylint: disable=broad-exception-caught
             self.debugLog(f"State update failed for {dev.name}: {e}")
 
+
+    # Discovery Logic (mDNS)
+    async def _start_discovery_service(self):
+        self.azc = AsyncZeroconf()
+        self.browser = AsyncServiceBrowser(self.azc.zeroconf, "_api._tcp.local.", handlers=[self])
+
+    def add_service(self, zc, type_, name):
+        """Async callback for discovered services."""
+        asyncio.run_coroutine_threadsafe(self._process_service(zc, type_, name), self.loop)
+
+    async def _process_service(self, zc, type_, name):
+        info = await zc.get_service_info(type_, name)
+        if info and info.addresses:
+            addr = socket.inet_ntoa(info.addresses)
+            DISCOVERED_FANS[name] = {"address": addr, "display": f"BAF [{name}] ({addr})"}
+
+    def remove_service(self, zc, type_, name): # pylint: disable=unused-argument
+        """Handles device removal from discovery list."""
+        DISCOVERED_FANS.pop(name, None)
+
+    def update_service(self, zc, type_, name):
+        """Handles property updates for discovered services."""
+        asyncio.run_coroutine_threadsafe(self._process_service(zc, type_, name), self.loop)
+
+    def getDiscoveredDevices(self, filter="", valuesDict=None, typeId="", targetId=0): # pylint: disable=invalid-name,unused-argument,redefined-builtin
+        """Populates the ConfigUI with verified BAF devices."""
+        items = [("manual", "Manual Input (Enter IP/Hostname below)")]
+        for info in DISCOVERED_FANS.values():
+            items.append((info['address'], info['display']))
+        return items
+
+    # --- Standard Indigo Action Callbacks ---
     def actionControlFan(self, action, dev): # pylint: disable=invalid-name
         """Handles standard Indigo Fan actions (On/Off/Speed)."""
         baf = self._get_baf_device_from_child(dev)
@@ -210,10 +234,7 @@ class Plugin(indigo.PluginBase, ServiceListener):
         if not baf:
             return
 
-        # Check if the parent bridge is configured to have a light
-        bridge_id_str = dev.pluginProps.get("bridge_id")
-        bridge_dev = indigo.devices[int(bridge_id_str)]
-        if not bridge_dev.pluginProps.get("hasLight", True):
+        if not baf.has_light:
             self.warnLog(f"User attempted to control light for fan '{dev.name}' which is configured as lightless.") # pylint: disable=line-too-long
             return
 
@@ -241,10 +262,10 @@ class Plugin(indigo.PluginBase, ServiceListener):
 
         # Simple linear approximation map from Kelvin (2700-6500) to BAF 0-1000 range
         temp_k = action.actionValue
-        baf_warmth_value = int(((temp_k - 2700) / (6500 - 2700)) * 1000)
-        baf_warmth_value = max(0, min(1000, baf_warmth_value))  # Clamp range
-        self.infoLog(f"Setting Light color temp {temp_k}K (BAF value: {baf_warmth_value}) on {dev.name}") # pylint: disable=line-too-long
-        asyncio.run_coroutine_threadsafe(baf.async_set_light_warmth(baf_warmth_value), self.loop)
+        baf_warmth = int(((temp_k - 2700) / (6500 - 2700)) * 1000)
+        baf_warmth = max(0, min(1000, baf_warmth))  # Clamp range
+        self.infoLog(f"Setting Light color temp {temp_k}K (BAF value: {baf_warmth}) on {dev.name}") # pylint: disable=line-too-long
+        asyncio.run_coroutine_threadsafe(baf.async_set_light_warmth(baf_warmth), self.loop)
 
     def actionSetFanMode(self, action, dev): # pylint: disable=invalid-name
         """Handles custom menu actions for fan modes (Auto, Whoosh, Eco, Reverse)."""
@@ -253,7 +274,7 @@ class Plugin(indigo.PluginBase, ServiceListener):
             return
 
         mode = action.props.get("modeType")
-        val = action.props.get("value") == "True"
+        val = action.props.get("value").lower() == "true"
         self.infoLog(f"Setting Fan mode '{mode}' to {val} on {dev.name}")
 
         dispatch = {
@@ -315,48 +336,3 @@ class Plugin(indigo.PluginBase, ServiceListener):
         if self.azc:
             asyncio.run_coroutine_threadsafe(self.azc.async_close(), self.loop)
         self.loop.stop()
-
-    # --- mDNS Discovery Methods ---
-
-    async def _start_discovery_service(self):
-        """Starts the mDNS browser in the background loop."""
-        self.debugLog("Starting mDNS discovery service...")
-        self.azc = AsyncZeroconf()
-        # TODO: Assuming the service type is '_baf_fan._tcp.local.'
-        self.browser = AsyncServiceBrowser(
-          self.azc.zeroconf,
-          "_baf_fan._tcp.local.",
-          handlers=[self]
-        )
-
-    def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        """Callback when a service is updated (Async method for listener)."""
-        asyncio.run_coroutine_threadsafe(self._async_get_service_info(zc, type_, name), self.loop)
-
-    def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:   # pylint: disable=unused-argument
-        """Callback when a service is removed."""
-        self.debugLog(f"Service {name} removed")
-        if name in DISCOVERED_FANS:
-            del DISCOVERED_FANS[name]
-
-    def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        """Callback when a new service is found."""
-        asyncio.run_coroutine_threadsafe(self._async_get_service_info(zc, type_, name), self.loop)
-
-    async def _async_get_service_info(self, zc, type_, name):
-        """Retrieves service info asynchronously and updates global list."""
-        info = await zc.get_service_info(type_, name)
-        if info and info.addresses:
-            # Convert binary IP address to string format
-            address = socket.inet_ntoa(info.addresses[0])
-            hostname = info.server.strip('.') if info.server else name
-            DISCOVERED_FANS[name] = {"address": address, "name": hostname}
-            self.debugLog(f"Discovered BAF: {hostname} at {address}")
-
-    def getDiscoveredDevices(self, filter="", valuesDict=None, typeId="", targetId=0):  # pylint: disable=unused-argument, redefined-builtin, invalid-name
-        """Called by Devices.xml to populate the dropdown list in the UI."""
-        device_list = [("manual", "Manual Input (enter IP/Hostname below)")]
-        for _, info in DISCOVERED_FANS.items():
-            device_list.append((info['address'], info['name'] + f" ({info['address']})"))
-        return device_list
-    # --- End mDNS Discovery Methods ---
