@@ -139,7 +139,8 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
                     f"Starting communication for '{dev.name}' at {dev.address}"
                 )
                 self.reconnect_tasks[dev.id] = asyncio.run_coroutine_threadsafe(
-                    self._connection_supervisor(dev.id, dev.address),
+                    self._connection_supervisor(dev.id,
+                                                self._get_service_from_config(dev.pluginProps)),
                     self.loop
                 )
 
@@ -387,7 +388,6 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
             self.logger.debug(
                 f"Stopping connection for Fan ID {fan_id}"
             )
-            self.loop.call_soon_threadsafe(baf.async_stop)
 
         # Remove all entries in the light map associated with this fan
         self.light_to_fan_map = {k: v for k, v in self.light_to_fan_map.items() if v != fan_id}
@@ -458,13 +458,16 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
 
     # --- Standard Indigo Action Callbacks ---
 
-    def actionControlFan(self, action, dev): # pylint: disable=invalid-name
+    def actionControlSpeedControl(self, action, dev): # pylint: disable=invalid-name
         """Handles standard Indigo Fan actions (On/Off/Speed)."""
-        if action.deviceAction == indigo.kDeviceAction.TurnOn:
+        if action.speedControlAction == indigo.kSpeedControlAction.TurnOn:
             self._dispatch_baf_command(dev, "async_set_fan_on", True)
-        elif action.deviceAction == indigo.kDeviceAction.TurnOff:
+        elif action.speedControlAction == indigo.kSpeedControlAction.TurnOff:
             self._dispatch_baf_command(dev, "async_set_fan_on", False)
-        elif action.deviceAction == indigo.kDeviceAction.SetBrightness:
+        elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedIndex:
+            speed = action.actionValue
+            self._dispatch_baf_command(dev, "async_set_speed", speed)
+        elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedLevel:
             speed = int(action.actionValue / SPEED_SCALE)
             self._dispatch_baf_command(dev, "async_set_speed", speed)
 
@@ -510,7 +513,7 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
 
     def actionDisableEco(self, action, dev): # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan eco mode"""
-        self._dispatch_baf_command(dev, "async_set_eco_mode_on", False)
+        self._dispatch_baf_command(dev, "async_set_eco_on", False)
 
     def actionEnableReverse(self, action, dev): # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan reverse direction"""
@@ -540,7 +543,7 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
         temp_k = action.actionValue
         warmth = int(((temp_k - 2700) / (6500 - 2700)) * 1000)
         warmth = max(0, min(1000, warmth))
-        self._dispatch_baf_command(dev, "async_light_warmth", warmth)
+        self._dispatch_baf_command(dev, "async_set_light_warmth", warmth)
 
 
 
