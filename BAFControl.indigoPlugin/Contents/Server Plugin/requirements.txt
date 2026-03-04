@@ -1,2 +1,2 @@
-aiobafi6>=0.10.1
+aiobafi6>=0.10.2
 zeroconf>=0.32.0

@@ -9,14 +9,22 @@ asynchronous aiobafi6 library using a background asyncio event loop.
 Parent Fan device manages child light device if applicable.
 """
 
+from __future__ import annotations
 import asyncio
+import concurrent.futures
 import logging
+from queue import Queue, Empty
 import socket
 import threading
-import indigo
-from aiobafi6 import Device, Service, ServiceBrowser
-from zeroconf.asyncio import AsyncZeroconf
+from typing import Any, Callable, Optional
+# noinspection PyUnresolvedReferences
+import indigo  # pylint: disable=import-error
+from aiobafi6 import (Device as BAFDevice, Service as BAFService)
+from device_discovery import BAFDeviceDiscoveryManager, ServiceId
 
+# Typing
+DeviceId = int
+DeviceMenuItem = tuple[ServiceId, str]
 
 # Device Types
 FAN_DEVICE_TYPE = "bafFan"
@@ -27,55 +35,173 @@ SPEED_SCALE = 100.0 / 7.0
 # BAF light brightness is 0-16 (approx 6.25% each step)
 BRIGHTNESS_SCALE = 100.0 / 16.0
 
-# Global dictionary for discovered devices: {Service_Name: {address, display}}
-DISCOVERED_FANS = {}
+# Service ID for manual IP/Port entry
+SERVICE_ID_MANUAL = "manual"
+# Default BAF device port
+DEFAULT_PORT = 31415
 
 
-class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
-    """Main Plugin class managing parent-child BAF hardware."""
+class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-many-instance-attributes
+    """Main Plugin class managing communication with BAF/Haiku devices."""
 
-    def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs): # pylint: disable=invalid-name
-        """Initialize plugin, data structures, and the async thread."""
+
+    # --- Plugin Lifecycle ---
+
+    def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):  # pylint: disable=invalid-name
+        """Initialize plugin and data structures."""
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self._set_log_level(pluginPrefs)
 
-        self.active_connections = {}  # {FAN_ID: Device}
-        self.reconnect_tasks = {}     # {FAN_ID: Task}
-        self.light_to_fan_map = {}    # {LIGHT_ID: FAN_ID}
-        self.azc = None
-        self.browser = None
+        self._lock = threading.Lock()
+        self.fan_to_baf_map: dict[DeviceId, BAFDevice] = {}
+        self.baf_to_fan_map: dict[BAFDevice, DeviceId] = {}
+        self.baf_connections: dict[DeviceId, asyncio.Future] = {}
+        self.light_to_fan_map: dict[DeviceId, DeviceId] = {}  # {LIGHT_ID: FAN_ID}
+        self.fan_availability: dict[DeviceId, bool] = {}
+
+        self.discovery_manager = BAFDeviceDiscoveryManager(self.logger)
+        self.event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self.event_loop_thread: Optional[threading.Thread] = None
+        self._device_operations_queue: Optional[Queue[Callable]] = None
+        self._stop_device_ops_event = threading.Event()
+
+
+    def startup(self):
+        """Called by Indigo wwhen the plugin is enabled."""
+        self.logger.info("Starting BAFControl Plugin...")
 
         # Initialize background loop for asynchronous I/O
-        self.loop = asyncio.new_event_loop()
-        self.async_thread = threading.Thread(
-            target=self._run_async_loop,
+        self.event_loop = asyncio.new_event_loop()
+        self.event_loop_thread = threading.Thread(
+            target=self._run_event_loop,
             daemon=True
         )
-        self.async_thread.start()
-        self.logger.info("BAF Plugin initialized and background thread started.")
+        self.event_loop_thread.start()
 
         # Start discovery browser
         asyncio.run_coroutine_threadsafe(
-            self._start_discovery_service(),
-            self.loop
+            self.discovery_manager.start(),
+            self.event_loop
         )
 
+        self.logger.info("BAFControl Plugin started.")
 
-    def closedPrefsConfigUi(self, valuesDict, userCancelled): # pylint: disable=invalid-name
+
+    def closedPrefsConfigUi(self, valuesDict, userCancelled):  # pylint: disable=invalid-name
         """Called by Indigo when the plugin preferences dialog is closed"""
         if not userCancelled:
             self._set_log_level(valuesDict)
 
 
-    def _run_async_loop(self):
+    def runConcurrentThread(self):  # pylint: disable=invalid-name
+        """Called by Indigo when the plugin is enabled."""
+        self.logger.info("Started device operations processor thread.")
+        self._stop_device_ops_event.clear()
+        self._device_operations_queue = Queue()
+
+        try:
+            while not self._stop_device_ops_event.is_set():
+                try:
+                    op: Callable = self._device_operations_queue.get(timeout=1.0)
+                    op()
+                except Empty:
+                    pass
+        except Exception as ex:   # pylint: disable=broad-exception-caught
+            self.logger.exception(f"Exception in device operations processor thread: {ex}")
+        finally:
+            self._device_operations_queue = None
+            self.logger.info("Stopped device operations processor thread.")
+
+
+    def stopConcurrentThread(self):  # pylint: disable=invalid-name
+        """Called by Indigo when the plugin is disabled."""
+        self.logger.info("Stopping device operations processor thread...")
+        self._stop_device_ops_event.set()
+
+
+    def shutdown(self):
+        """Called by Indigo when the plugin is disabled."""
+        self.logger.info("Shutting down BAFControl Plugin...")
+
+        # Stop discovery manager
+        try:
+            if self.event_loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.discovery_manager.stop(),
+                    self.event_loop
+                ).result(timeout=2.0)
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+            self.logger.warning("Timed out waiting for discovery to stop.")
+        finally:
+            # Stop all active fan connections and supervisors
+            with self._lock:
+                fan_ids = list(self.fan_to_baf_map.keys())
+            for fan_id in fan_ids:
+                self._stop_baf_connection(fan_id)
+
+            self._stop_event_loop()
+
+            with self._lock:
+                self.fan_to_baf_map.clear()
+                self.baf_to_fan_map.clear()
+                self.baf_connections.clear()
+                self.light_to_fan_map.clear()
+                self.fan_availability.clear()
+
+            self.logger.info("Plugin shutdown complete.")
+
+
+    def _add_device_operation(self, op: Callable) -> None:
+        """Adds a device operation onto the queue for Indigo's concurrent thread."""
+        q = self._device_operations_queue
+        if q:
+            q.put(op)
+
+
+    def _run_event_loop(self) -> None:
         """Internal method to start and maintain the asyncio loop."""
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
+        asyncio.set_event_loop(self.event_loop)
+        try:
+            self.event_loop.run_forever()
+        finally:
+            self.event_loop.close()
+            self.logger.debug("Async loop thread terminating")
 
 
-    def _set_log_level(self, plugin_prefs):
+    def _stop_event_loop(self) -> None:
+        """Internal method to stop and clea up the asyncio loop."""
+        try:
+            # Schedule shutdown in the loop
+            if self.event_loop and not self.event_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self.event_loop.shutdown_asyncgens(),
+                    self.event_loop
+                ).result(timeout=2.0)
+        except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
+            self.logger.warning("Timed out waiting for async generators to shut down.")
+        except Exception as ex:  # pylint: disable=broad-exception-caught
+            self.logger.debug(f"Shutdown event loop failed: {ex}")
+
+        try:
+            if self.event_loop and not self.event_loop.is_closed():
+                # noinspection PyArgumentList,PyTypeChecker
+                self.event_loop.call_soon_threadsafe(self.event_loop.stop)
+        except RuntimeError:
+            pass  # Loop already stopped
+
+        # Wait for async thread to terminate gracefully (with timeout)
+        if self.event_loop_thread and self.event_loop_thread.is_alive():
+            self.event_loop_thread.join(timeout=2.0)
+            if self.event_loop_thread.is_alive():
+                self.logger.warning("Event loop thread did not terminate gracefully")
+
+        self.event_loop_thread = None
+        self.event_loop = None
+
+
+    def _set_log_level(self, plugin_prefs: dict) -> None:
         """Set logging level based on plugin preferences"""
-        log_level = int(plugin_prefs.get("logLevel", logging.INFO))
+        log_level: int = int(plugin_prefs.get("logLevel", logging.INFO))
         self.indigo_log_handler.setLevel(log_level)
         self.plugin_file_handler.setLevel(log_level)
         logging.getLogger("aiobafi6").setLevel(log_level)
@@ -83,8 +209,25 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
 
 
 
-    # --- Device Lifecycle ---
+    # --- Device Configuration Callbacks ---
 
+    # noinspection PyShadowingBuiltins,PyUnusedLocal
+    def getDiscoveredDevices(self, filter="", valuesDict=None, typeId="", targetId=0):  # pylint: disable=invalid-name,unused-argument,redefined-builtin
+        """Populates the ConfigUI with verified BAF devices."""
+        items: list[DeviceMenuItem] = []
+        for service_id, service in self.discovery_manager.discovered_services.items():
+            if service is not None:  # Skip deleted entries
+                name = "Unnamed Fan"
+                if hasattr(service, 'device_name') and service.device_name:
+                    name = service.device_name
+                display_name = f"{name} [{getattr(service, 'model', 'Unknown')}] ({service_id})"
+                items.append((service_id, display_name))
+        self.logger.debug(f"Discovered BAF devices: {items}")
+        items.append((SERVICE_ID_MANUAL, "Manual Input (Enter IP/Hostname below)"))
+        return items
+
+
+    # noinspection PyUnusedLocal
     def validateDeviceConfigUi(self, valuesDict, typeId, devId):  # pylint: disable=invalid-name,unused-argument
         """Called by Indigo to validate the device configuration"""
         self.logger.debug(
@@ -108,252 +251,418 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
             self.logger.debug(
                 f"Invalid config for device {devId}: {valuesDict}, {errors}"
             )
+            # noinspection PyRedundantParentheses
             return (False, valuesDict, errors)
 
-        valuesDict["address"] = self._get_service_id(service)
+        valuesDict["address"] = self.discovery_manager.get_service_id(service)
         self.logger.debug(
             f"Valid config for device {devId}: {valuesDict}"
         )
+        # noinspection PyRedundantParentheses
         return (True, valuesDict)
 
 
-    def closedDeviceConfigUi(self, valuesDict, userCancelled, typeId, devId):  # pylint: disable=invalid-name,unused-argument
-        """Called by Indigo to save the device configuration"""
-        if not userCancelled:
-            self.logger.debug(
-                f"Saving config for device {devId}: {valuesDict}"
-            )
+    # Device Lifecycle
 
-
-    def deviceStartComm(self, dev): # pylint: disable=invalid-name
+    def deviceStartComm(self, dev):  # pylint: disable=invalid-name
         """Called by Indigo when a device is enabled."""
-        if dev.deviceTypeId == FAN_DEVICE_TYPE:
-            if not dev.address:
-                self.logger.error(f"Device {dev.id} has and invalid address")
-                dev.setErrorStateOnServer("invalid address")
-                return
+        if dev.deviceTypeId != FAN_DEVICE_TYPE:
+            return
 
-            # Start connection supervisor
-            if dev.id not in self.reconnect_tasks:
-                self.logger.info(
-                    f"Starting communication for '{dev.name}' at {dev.address}"
-                )
-                self.reconnect_tasks[dev.id] = asyncio.run_coroutine_threadsafe(
-                    self._connection_supervisor(dev.id,
-                                                self._get_service_from_config(dev.pluginProps)),
-                    self.loop
+        service = self._get_service_from_config(dev.pluginProps)
+        if service is None:
+            self.logger.error(f"Failed to get device address for device {dev.id}")
+            dev.setErrorStateOnServer("invalid configuration")
+            return
+
+        # First, cancel any existing supervisor for this fan to be safe
+        self._stop_baf_connection(dev.id)
+
+        # Start connection supervisor
+        self.logger.info(
+            f"Starting communication with '{dev.name}' at {dev.address}"
+        )
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._start_baf_connection(dev.id, service),
+                self.event_loop
+            )
+            with self._lock:
+                self.baf_connections[dev.id] = future
+        except Exception as ex:  # pylint: disable=broad-exception-caught
+            self.logger.exception(f"Failed to start communication with {dev.id}: {ex}")
+            dev.setErrorStateOnServer("connection failed")
+
+
+    def deviceStopComm(self, dev):  # pylint: disable=invalid-name
+        """Called by Indigo when a device is disabled."""
+        if dev.deviceTypeId == FAN_DEVICE_TYPE:
+            # First stop the connection supervisor and cleanup
+            self._stop_baf_connection(dev.id)
+
+            # Delete light sub-device as well
+            light_id = dev.pluginProps.get("child_light_id")
+            if light_id and light_id in indigo.devices:
+                self.logger.debug(f"Queueing light deletion for {dev.name}")
+                self._add_device_operation(
+                    lambda: self._delete_light(light_id, dev.id)
                 )
 
         elif dev.deviceTypeId == LIGHT_DEVICE_TYPE:
-            # Re-map light on startup or if enabled
-            for fan in indigo.devices.withFilter(FAN_DEVICE_TYPE):
-                if fan.pluginProps.get("child_light_id") == dev.id:
-                    self.light_to_fan_map[dev.id] = fan.id
+            # Remove from light to fan map
+            with self._lock:
+                if dev.id in self.light_to_fan_map:
+                    del self.light_to_fan_map[dev.id]
 
 
-    def deviceStopComm(self, dev): # pylint: disable=invalid-name
-        """Called by Indigo when a device is disabled."""
-        if dev.deviceTypeId == FAN_DEVICE_TYPE:
-            light_id = dev.pluginProps.get("child_light_id")
-            if light_id:
-                try:
-                    indigo.device.delete(light_id)
-                except: # pylint: disable=bare-except
-                    pass
+    # Parse device configuration
 
-            self._stop_communication(dev.id)
-
-
-    def _get_ip_address_from_config(self, values_dict):
+    def _get_ip_address_from_config(self, values_dict: dict) -> Optional[str]:
         """Gets the IP address from the config, or None if invalid."""
-        ip_address = None
-        service_id = values_dict.get("selected_device")
-        self.logger.debug(f"Reading selected_device = {service_id}")
-        # Determine address from UI (Manual vs Discovery)
-        if service_id == "manual":
+        ip_address: Optional[str] = None
+        service_id: ServiceId = values_dict.get("selected_device")
+        if service_id == SERVICE_ID_MANUAL:
             ip_address = values_dict.get("manual_address")
-            self.logger.debug(f"Reading manual_address = {ip_address}")
-
-            # Validate address resolution for manual entry
             if ip_address:
                 try:
-                    socket.gethostbyname(ip_address)
-                    self.logger.debug(f"Validated IP address {ip_address}")
-                except socket.gaierror:
-                    self.logger.exception(f"gethostbyname({ip_address})")
+                    # Run hostname lookup in a separate thread to avoid blocking the UI
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(socket.gethostbyname, ip_address)
+                        future.result(timeout=2.0)
+                except (socket.gaierror, concurrent.futures.TimeoutError) as ex:
+                    self.logger.exception(f"Unable to validate IP address {ip_address}: {ex}")
+                    ip_address = None
+
         elif service_id:
-            service = DISCOVERED_FANS[service_id]
-            if service:
-                self.logger.debug(f"Selected device: {service}")
+            service = self.discovery_manager.get_service_by_id(service_id)
+            if service and hasattr(service, 'ip_addresses') and service.ip_addresses:
                 ip_address = service.ip_addresses[0]
             else:
                 self.logger.error(f"Unable to find selected device {service_id}")
 
-        self.logger.debug(f"IP address is {ip_address}")
         return ip_address
 
 
-    def _get_port_from_config(self, values_dict):
+    def _get_port_from_config(self, values_dict: dict) -> Optional[int]:
         """Gets the port from the config, or None if invalid."""
-        port = None
-        service_id = values_dict.get("selected_device")
-        self.logger.debug(f"Reading selected_device = {service_id}")
-        # Determine port from UI (Manual vs Discovery)
-        if service_id == "manual":
+        port: Optional[int] = None
+        service_id: ServiceId = values_dict.get("selected_device")
+        if service_id == SERVICE_ID_MANUAL:
             portstr = values_dict.get("manual_port")
-            self.logger.debug(f"Reading manual_port = {portstr}")
             try:
                 port = int(portstr)
-            except ValueError:
-                self.logger.exception(f"Invalid port specified: {portstr}")
+            except (ValueError, TypeError):
+                self.logger.error(
+                    f"Invalid port specified: {portstr}, using default {DEFAULT_PORT} instead"
+                )
         elif service_id:
-            service = DISCOVERED_FANS[service_id]
+            service = self.discovery_manager.get_service_by_id(service_id)
             if service:
-                self.logger.debug(f"Selected device: {service}")
                 port = service.port
             else:
                 self.logger.error(f"Unable to find selected device {service_id}")
 
-        self.logger.debug(f"Port is {port}")
-        if port < 1 or port > 65535:
-            self.logger.error(f"Invalid port specified: {port}")
+        if port is not None and (port < 1 or port > 65535):
+            self.logger.error(
+                f"Invalid port specified: {port}, using default {DEFAULT_PORT} instead"
+            )
             port = None
+
+        if port is None:
+            port = DEFAULT_PORT
 
         return port
 
 
-    def _get_service_from_config(self, values_dict):
-        """Gets the Servie object from the config, or None if invalid."""
-        service = None
-        service_id = values_dict.get("selected_device")
-        self.logger.debug(f"Reading selected_device = {service_id}")
-        # Determine Service from UI (Manual vs Discovery)
-        if service_id == "manual":
-            ip_address = self._get_ip_address_from_config(values_dict)
+    def _get_service_from_config(self, values_dict: dict) -> Optional[BAFService]:
+        """Gets the Service object from the config, or None if invalid."""
+        service: Optional[BAFService] = None
+        service_id: ServiceId = values_dict.get("selected_device")
+        if service_id == SERVICE_ID_MANUAL:
+            ip_address  = self._get_ip_address_from_config(values_dict)
             port = self._get_port_from_config(values_dict)
             if ip_address and port:
-                service = Service([ip_address], port)
-                service_id = self._get_service_id(service)
-                DISCOVERED_FANS[service_id] = service
+                service = BAFService([ip_address], port)
+                service_id = self.discovery_manager.get_service_id(service)
+                if service_id:
+                    self.discovery_manager.add_service_by_id(service, service_id)
             else:
-                service_id = None
-
-        if service_id:
-            service = DISCOVERED_FANS[service_id]
+                self.logger.error("Manual address and/or port configuration is invalid")
         else:
-            self.logger.error(f"Unable to find selected service from {values_dict}")
+            service = self.discovery_manager.get_service_by_id(service_id)
+            if not service:
+                self.logger.error(f"Unable to find selected device {service_id}")
 
         return service
 
 
-    def _get_baf_instance(self, dev):
-        """Helper to find the active connection for either a fan or light device."""
-        fan_id = dev.id
-        if dev.deviceTypeId == LIGHT_DEVICE_TYPE and dev.id is not None:
-            fan_id = self.light_to_fan_map.get(dev.id)
-        if fan_id is not None:
-            return self.active_connections.get(fan_id)
-        return None
+    # Device connection management
 
-
-    async def _connection_supervisor(self, fan_id, service):
+    async def _start_baf_connection(self, fan_id: DeviceId, service: BAFService) -> None:
         """
         Manages hardware connection and child light lifecycle.
-        This task runs forever in the background loop.
+        This method runs forever as a background Task.
         """
+        service_id = self.discovery_manager.get_service_id(service)
+        if not service_id:
+            self.logger.error(f"Failed to get service ID for fan {fan_id}")
+            return
+
+        self.logger.debug(
+            f"Connection supervisor started for Fan ID {fan_id} to {service_id}"
+        )
         backoff = 5.0
         max_backoff = 300.0
 
-        while True:
-            try:
-                service_id = self._get_service_id(service)
-                self.logger.debug(
-                    f"Attempting connection for Fan ID {fan_id} to {service_id}"
-                )
-                baf = Device(service)
-
-                def state_callback(device):
-                    # Update Fan visibility state based on hardware discovery
-                    fan_dev = indigo.devices.get(fan_id)
-                    if not fan_dev:
-                        return
-
-                    # --- Automatic Child Light Creation ---
-                    light_id = fan_dev.pluginProps.get("child_light_id")
-                    if device.has_light and not light_id:
-                        new_light = indigo.device.create(
-                            protocol=indigo.kProtocol.Plugin,
-                            address=service_id,
-                            name=f"{fan_dev.name} Light",
-                            deviceTypeId=LIGHT_DEVICE_TYPE,
-                            folder=fan_dev.folderId
-                        )
-                        props = fan_dev.pluginProps
-                        props["child_light_id"] = new_light.id
-                        fan_dev.replacePluginPropsOnServer(props)
-                        self.light_to_fan_map[new_light.id] = fan_id
-                        self.logger.info(
-                            f"Automatically created child light for {fan_dev.name}"
-                        )
-
-                    # --- Update Indigo States ---
-                    self._update_states(fan_dev, device)
-                    if device.has_light and light_id:
-                        light_dev = indigo.devices.get(light_id)
-                        if light_dev:
-                            self._update_states(light_dev, device)
-
-                baf.add_callback(state_callback)
-                self.active_connections[fan_id] = baf
-
-                # Clear error states in Indigo on successful start/reconnect
-                indigo.devices[fan_id].setErrorStateOnServer(None)
-
-                # Wait for initial data and maintain connection until it drops
-                await baf.async_run()
-
-                # If we get here, the conneciton was closed
-                raise Exception("Connection closed") # pylint: disable=broad-exception-raised
-
-            except Exception: # pylint: disable=broad-exception-caught
-                self.active_connections.pop(fan_id, None)
-                self.logger.exception(f"Connection lost to {service_id}")
-                indigo.devices[fan_id].setErrorStateOnServer("offline")
-
-                self.logger.warn(
-                    f"Reconnecting to Fan ID {fan_id} in {backoff} seconds..."
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
-
-    def _update_states(self, dev, baf):
-        """Maps BAF properties to native and custom Indigo device states."""
         try:
-            if dev.deviceTypeId == FAN_DEVICE_TYPE:
-                dev.updateStatesOnServer([
-                    {'key': 'speed', 'value': baf.speed},
-                    {'key': 'onOffState', 'value': baf.fan_on},
-                    {'key': 'auto_mode', 'value': baf.fan_auto_on},
-                    {'key': 'whoosh_mode', 'value': baf.whoosh_mode_on},
-                    {'key': 'eco_mode', 'value': baf.eco_mode_on},
-                    {'key': 'reverse_direction', 'value': baf.reverse_direction_on}
-                ])
-            elif dev.deviceTypeId == LIGHT_DEVICE_TYPE:
-                dev.updateStatesOnServer([
-                    {'key': 'onOffState', 'value': baf.light_on},
-                    {'key': 'brightness',
-                     'value': (baf.light_brightness * BRIGHTNESS_SCALE)},
-                    {'key': 'auto_mode', 'value': baf.light_auto_on},
-                    {'key': 'warmth', 'value': baf.light_warmth}
-                ])
-        except Exception: # pylint: disable=broad-exception-caught
-            self.logger.exception(f"State update failed for {dev.name}")
+            while True:
+                with self._lock:
+                    if fan_id not in self.baf_connections:
+                        self.logger.debug(f"Connection supervisor for {fan_id} cancelled.")
+                        break
+                # noinspection PyBroadException
+                try:
+                    await self._manage_baf_connection(fan_id, service_id, service)
+                    backoff = 5.0  # Reset backoff on successful connection
+                except asyncio.CancelledError:  # pylint:disable=try-except-raise
+                    # Propagate cancellation
+                    raise
+                except Exception:  # pylint: disable=broad-exception-caught
+                    self.logger.warning(f"Reconnecting to Fan ID {fan_id} in {backoff} seconds...")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, max_backoff)
+
+        except asyncio.CancelledError:
+            self.logger.debug(
+                f"Connection supervisor for Fan ID {fan_id} was cancelled"
+            )
+        finally:
+            self.logger.debug(
+                f"Connection supervisor for Fan ID {fan_id} stopped"
+            )
 
 
-    def _dispatch_baf_command(self, dev, baf_method, *args):
+    def _stop_baf_connection(self, fan_id: DeviceId) -> None:
+        """Centralized cleanup for stopping a specific hardware connection."""
+        with self._lock:
+            self.fan_availability.pop(fan_id, None)
+            task = self.baf_connections.pop(fan_id, None)
+            baf = self.fan_to_baf_map.pop(fan_id, None)
+            if baf:
+                self.baf_to_fan_map.pop(baf, None)
+
+        if task:
+            self.logger.debug(f"Canceling connection for Fan ID {fan_id}")
+            try:
+                task.cancel()
+            except Exception as ex:  # pylint: disable=broad-exception-caught
+                self.logger.exception(f"Failed to cancel task for Fan ID {fan_id}: {ex}")
+        else:
+            self.logger.debug(f"No task for Fan ID {fan_id}, connection may already be stopped")
+
+        self._add_device_operation(lambda: self._update_error_state(fan_id, "offline"))
+
+
+    async def _manage_baf_connection(self, fan_id: DeviceId,
+                                     service_id: ServiceId,
+                                     service: BAFService) -> None:
         """
-        Retrieves the correct BAF instance and dispatches an 
+        Connects to a fan device and processes state callbacks.
+        Keeps running for as long as the fan stays connected.
+        """
+        self.logger.debug(
+            f"Attempting connection to Fan ID {fan_id} at {service_id}"
+        )
+
+        baf = BAFDevice(service)
+        with self._lock:
+            self.fan_to_baf_map[fan_id] = baf
+            self.baf_to_fan_map[baf] = fan_id
+
+        baf.add_callback(self._baf_state_callback)
+
+        self.logger.info(
+            f"Connection established to Fan ID {fan_id} at {service_id}, monitoring connection..."
+        )
+
+        try:
+            await baf.async_run()
+        finally:
+            baf.remove_callback(self._baf_state_callback)
+            self.logger.warning(f"Connection closed for Fan ID {fan_id} at {service_id}")
+            self._add_device_operation(lambda: self._update_error_state(fan_id, "offline"))
+            raise ConnectionAbortedError("Connection was closed")
+
+
+    def _baf_state_callback(self, baf_device: BAFDevice) -> None:
+        """Handles callback from all BAF devices"""
+        with self._lock:
+            fan_id: Optional[DeviceId] = self.baf_to_fan_map.get(baf_device)
+        if fan_id:
+            self._handle_baf_state_callback(baf_device, fan_id)
+        else:
+            self.logger.debug("Unable to find fan_id for BAF device callback")
+
+
+    def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:
+        """Handles callback for a specific BAF device with state updates"""
+        try:
+            fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+            if not fan_dev:
+                self.logger.debug(f"Fan device {fan_id} no longer exists, stopping callback")
+                return
+
+            self._update_fan_states(fan_dev, baf_device)
+
+            # Handle child light device - create/delete if necessary
+            light_id: Optional[DeviceId] = fan_dev.pluginProps.get("child_light_id")
+            # noinspection PyUnresolvedReferences
+            if baf_device.has_any_light:
+                if light_id:
+                    light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
+                    if light_dev:
+                        self._update_light_states(light_dev, baf_device)
+                else:
+                    self.logger.debug(f"Queueing light creation for fan {fan_id}")
+                    self._add_device_operation(
+                        lambda: self._create_light(fan_id, fan_dev.name,
+                                                   fan_dev.address, baf_device)
+                    )
+            elif light_id:
+                self.logger.debug(f"Queueing light deletion for fan {fan_id}")
+                self._add_device_operation(
+                    lambda: self._delete_light(light_id, fan_id)
+                )
+
+        except Exception as ex:  # pylint: disable=broad-exception-caught
+            self.logger.exception(f"State callback error for fan {fan_id}: {ex}")
+
+
+    def _create_light(self, fan_id: DeviceId, fan_name: str,
+                      service_id: ServiceId, baf_device: BAFDevice) -> None:
+        """Helper method to create a child light device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and not fan_dev.pluginProps.get("child_light_id"):
+            new_light: indigo.Device = indigo.device.create(
+                protocol=indigo.kProtocol.Plugin,
+                address=service_id,
+                name=f"{fan_name} Light",
+                deviceTypeId=LIGHT_DEVICE_TYPE,
+                folder=fan_dev.folderId
+            )
+
+            # Update fan properties
+            props = dict(fan_dev.pluginProps)
+            props["child_light_id"] = new_light.id
+            fan_dev.replacePluginPropsOnServer(props)
+
+            with self._lock:
+                self.light_to_fan_map[new_light.id] = fan_id
+            self.logger.info(f"Created child light device {new_light.id} for {fan_name}")
+
+            self._update_light_states(new_light, baf_device)
+
+
+    def _delete_light(self, light_id: DeviceId, fan_id: DeviceId) -> None:
+        """Helper method to delete a child light device (called on concurrent thread)."""
+        light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
+        if light_dev:
+            indigo.device.delete(light_id)
+            self.logger.info(f"Removed child light device {light_id} for fan {fan_id}")
+
+        with self._lock:
+            self.light_to_fan_map.pop(light_id, None)
+
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and fan_dev.pluginProps.get("child_light_id"):
+            props = dict(fan_dev.pluginProps)
+            props.pop("child_light_id", None)
+            fan_dev.replacePluginPropsOnServer(props)
+
+    # noinspection PyUnresolvedReferences
+    def _update_fan_states(self, fan_dev: indigo.Device, baf_dev: BAFDevice) -> None:
+        """Maps BAF properties to native and custom Indigo device states."""
+        self._update_device_available(fan_dev, baf_dev.available)
+        if baf_dev.available:
+            states = [
+                {'key': 'speed', 'value': baf_dev.speed},
+                {'key': 'onOffState', 'value': baf_dev.fan_on},
+                {'key': 'auto_mode', 'value': baf_dev.fan_auto_on},
+                {'key': 'whoosh_mode', 'value': baf_dev.whoosh_mode_on},
+                {'key': 'eco_mode', 'value': baf_dev.eco_mode_on},
+                {'key': 'reverse_direction', 'value': baf_dev.reverse_direction_on}
+            ]
+            self._add_device_operation(
+                lambda: self._update_device_states_on_server(fan_dev, states)
+            )
+
+
+    def _update_device_states_on_server(self, dev: indigo.Device, states: list[dict]) -> None:
+        """Updates the device states on the server (called on concurrent thread)."""
+        try:
+            dev.updateStatesOnServer(states)
+        except (KeyError, AttributeError, TypeError) as ex:
+            self.logger.exception(f"State update failed for {dev.name}: {ex}")
+
+
+    # noinspection PyUnresolvedReferences
+    def _update_light_states(self, light_dev: indigo.Device, baf_dev: BAFDevice) -> None:
+        """Maps BAF properties to native and custom Indigo device states."""
+        self._update_device_available(light_dev, baf_dev.available)
+        if baf_dev.available:
+            states = [
+                {'key': 'onOffState', 'value': baf_dev.light_on},
+                {'key': 'brightness',
+                 'value': (baf_dev.light_brightness * BRIGHTNESS_SCALE)},
+                {'key': 'auto_mode', 'value': baf_dev.light_auto_on},
+                {'key': 'warmth', 'value': baf_dev.light_warmth}
+            ]
+            self._add_device_operation(
+                lambda: self._update_device_states_on_server(light_dev, states)
+            )
+
+
+    def _update_device_available(self, dev: indigo.Device, available: bool) -> None:
+        """Updates device availability state on the server (uses concurrent thread.)"""
+        with self._lock:
+            is_available = self.fan_availability.get(dev.id, False)
+        if available != is_available:
+            with self._lock:
+                self.fan_availability[dev.id] = available
+            self._add_device_operation(
+                lambda: dev.setErrorStateOnServer("offline" if not available else None)
+            )
+
+
+    def _update_error_state(self, fan_id: DeviceId, state: Optional[str]) -> None:
+        """Updates the error state for the fan device (and light sub-device if applicable)"""
+        with self._lock:
+            self.fan_availability[fan_id] = state is None
+        fan = indigo.devices.get(fan_id)
+        if fan:
+            fan.setErrorStateOnServer(state)
+            light_id = fan.pluginProps.get("child_light_id")
+            if light_id:
+                light = indigo.devices.get(light_id)
+                if light:
+                    light.setErrorStateOnServer(state)
+
+
+    def _get_baf_instance(self, dev: indigo.Device) -> Optional[BAFDevice]:
+        """Helper to find the active connection for either a fan or light device."""
+        fan_id = dev.id
+        if dev.deviceTypeId == LIGHT_DEVICE_TYPE:
+            with self._lock:
+                fan_id = self.light_to_fan_map.get(dev.id)
+        if fan_id is not None:
+            with self._lock:
+                return self.fan_to_baf_map.get(fan_id)
+        return None
+
+
+    def _dispatch_baf_command(self, dev: indigo.Device, baf_method: str, *args: Any) -> bool:
+        """
+        Retrieves the correct BAF instance and dispatches an
         asynchronous command to the background loop.
         """
         baf = self._get_baf_instance(dev)
@@ -361,104 +670,37 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
             self.logger.error(
                 f"Command {baf_method} failed: '{dev.name}' is offline or not linked."
             )
-            return
+            return False
 
         # Dynamically get the method from the BAF instance and schedule it
         method = getattr(baf, baf_method, None)
         if method:
             self.logger.debug(f"Dispatching {baf_method} for '{dev.name}'")
-            asyncio.run_coroutine_threadsafe(method(*args), self.loop)
-        else:
-            self.logger.error(
-                f"Invalid hardware method: {baf_method} for '{dev.name}'"
-            )
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(method(*args), self.event_loop)
+                future.add_done_callback(self._handle_dispatch_baf_command_async_result)
+                return True
+            except RuntimeError:
+                self.logger.error(
+                    f"Failed to schedule command {baf_method}: event loop is not running."
+                )
+                return False
+
+        self.logger.error(f"Invalid hardware method: {baf_method} for '{dev.name}'")
+        return False
 
 
-    def _stop_communication(self, fan_id):
-        """Centralized cleanup for stopping a specific hardware connection."""
-        task = self.reconnect_tasks.pop(fan_id, None)
-        if task:
-            self.logger.debug(
-                f"Canceling reconnection supervisor for Fan ID {fan_id}"
-            )
-            task.cancel()
-
-        baf = self.active_connections.pop(fan_id, None)
-        if baf:
-            self.logger.debug(
-                f"Stopping connection for Fan ID {fan_id}"
-            )
-
-        # Remove all entries in the light map associated with this fan
-        self.light_to_fan_map = {k: v for k, v in self.light_to_fan_map.items() if v != fan_id}
+    def _handle_dispatch_baf_command_async_result(self, fut):
+        try:
+            fut.result()
+        except Exception as ex:  # pylint: disable=broad-exception-caught
+            self.logger.exception(f"Dispatch command failed with exception: {ex}")
 
 
+    # --- Fan Action Callbacks ---
 
-    # --- Device Discovery ---
-
-    async def _start_discovery_service(self):
-        """Starts device discovery with this pluugin as the callback handler."""
-        if not self.azc:
-            self.logger.debug("Starting BAF device discovery")
-            self.azc = AsyncZeroconf()
-            self.browser = ServiceBrowser(self.azc.zeroconf, self)
-
-
-    async def _stop_discovery_service(self):
-        """Starts device discovery with this pluugin as the callback handler."""
-        if self.azc:
-            self.logger.debug("Stopping BAF device discovery")
-            self.azc.async_close()
-            self.azc = None
-            self.browser = None
-
-
-    def _get_service_id(self, service):
-        service_id = None
-        if service and service.ip_addresses and len(service.ip_addresses) > 0:
-            service_id = f"{service.ip_addresses[0]}:{service.port}"
-        return service_id
-
-
-    def add_service(self, service):
-        """Callback from aiobafi6.discovery when a verified fan is found."""
-        self.logger.info(
-            f"Discovered BAF Device: {service.device_name} {service.ip_addresses} {service.port}"
-        )
-        service_id = self._get_service_id(service)
-        if service_id:
-            self.logger.debug(f"Saving BAF Device with id {service_id}")
-            DISCOVERED_FANS[service_id] = service
-
-
-    def remove_service(self, service):
-        """Callback from aiobafi6.discovery when a fan is removed."""
-        self.logger.info(
-            f"Removed BAF Device: {service.device_name} {service.ip_addresses} {service.port}"
-        )
-        service_id = self._get_service_id(service)
-        if service_id:
-            self.logger.debug(f"Removing BAF Device with id {service_id}")
-            DISCOVERED_FANS.pop(service_id, None)
-
-
-    def getDiscoveredDevices(self, filter="", valuesDict=None, typeId="", targetId=0): # pylint: disable=invalid-name,unused-argument,redefined-builtin
-        """Populates the ConfigUI with verified BAF devices."""
-        items = [("manual", "Manual Input (Enter IP/Hostname below)")]
-        for service_id, service in DISCOVERED_FANS.items():
-            name = "Unnamed Fan"
-            if service.device_name:
-                name = service.device_name
-            display_name = f"{name} [{service.model}] ({service_id})"
-            items.append((service_id, display_name))
-        self.logger.debug(f"Discovered BAF devices: {items}")
-        return items
-
-
-
-    # --- Standard Indigo Action Callbacks ---
-
-    def actionControlSpeedControl(self, action, dev): # pylint: disable=invalid-name
+    def actionControlSpeedControl(self, action, dev):  # pylint: disable=invalid-name
         """Handles standard Indigo Fan actions (On/Off/Speed)."""
         if action.speedControlAction == indigo.kSpeedControlAction.TurnOn:
             self._dispatch_baf_command(dev, "async_set_fan_on", True)
@@ -471,8 +713,50 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
             speed = int(action.actionValue / SPEED_SCALE)
             self._dispatch_baf_command(dev, "async_set_speed", speed)
 
+    # noinspection PyUnusedLocal
+    def actionEnableFanAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles enabling fan auto mode"""
+        self._dispatch_baf_command(dev, "async_set_fan_auto_on", True)
 
-    def actionControlDimmerRelay(self, action, dev): # pylint: disable=invalid-name
+    # noinspection PyUnusedLocal
+    def actionDisableFanAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles disabling fan auto mode"""
+        self._dispatch_baf_command(dev, "async_set_fan_auto_on", False)
+
+    # noinspection PyUnusedLocal
+    def actionEnableWhoosh(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles enabling fan whoosh mode"""
+        self._dispatch_baf_command(dev, "async_set_whoosh_mode_on", True)
+
+    # noinspection PyUnusedLocal
+    def actionDisableWhoosh(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles disabling fan whoosh mode"""
+        self._dispatch_baf_command(dev, "async_set_whoosh_mode_on", False)
+
+    # noinspection PyUnusedLocal
+    def actionEnableEco(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles enabling fan eco mode"""
+        self._dispatch_baf_command(dev, "async_set_eco_mode_on", True)
+
+    # noinspection PyUnusedLocal
+    def actionDisableEco(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles disabling fan eco mode"""
+        self._dispatch_baf_command(dev, "async_set_eco_mode_on", False)
+
+    # noinspection PyUnusedLocal
+    def actionEnableReverse(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles enabling fan reverse direction"""
+        self._dispatch_baf_command(dev, "async_set_reverse_direction_on", True)
+
+    # noinspection PyUnusedLocal
+    def actionDisableReverse(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+        """Handles disabling fan reverse direction"""
+        self._dispatch_baf_command(dev, "async_set_reverse_direction_on", False)
+
+
+    # --- Light Action Callbacks ---
+
+    def actionControlDimmerRelay(self, action, dev):  # pylint: disable=invalid-name
         """Handles standard Indigo Light actions (On/Off/Brightness)."""
         if action.deviceAction == indigo.kDeviceAction.TurnOn:
             self._dispatch_baf_command(dev, "async_set_light_on", True)
@@ -482,86 +766,19 @@ class Plugin(indigo.PluginBase): # pylint: disable=too-many-public-methods
             brightness = int(action.actionValue / BRIGHTNESS_SCALE)
             self._dispatch_baf_command(dev, "async_set_light_brightness", brightness)
 
-
-
-    # --- Fan Action Callbacks ---
-
-    def actionEnableFanAuto(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles enabling fan auto mode"""
-        self._dispatch_baf_command(dev, "async_set_fan_auto_on", True)
-
-
-    def actionDisableFanAuto(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles disabling fan auto mode"""
-        self._dispatch_baf_command(dev, "async_set_fan_auto_on", False)
-
-
-    def actionEnableWhoosh(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles enabling fan whoosh mode"""
-        self._dispatch_baf_command(dev, "async_set_whoosh_mode_on", True)
-
-
-    def actionDisableWhoosh(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles disabling fan whoosh mode"""
-        self._dispatch_baf_command(dev, "async_set_whoosh_mode_on", False)
-
-
-    def actionEnableEco(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles enabling fan eco mode"""
-        self._dispatch_baf_command(dev, "async_set_eco_mode_on", True)
-
-
-    def actionDisableEco(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles disabling fan eco mode"""
-        self._dispatch_baf_command(dev, "async_set_eco_on", False)
-
-    def actionEnableReverse(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles enabling fan reverse direction"""
-        self._dispatch_baf_command(dev, "async_set_reverse_direction_on", True)
-
-
-    def actionDisableReverse(self, action, dev): # pylint: disable=invalid-name,unused-argument
-        """Handles disabling fan reverse direction"""
-        self._dispatch_baf_command(dev, "async_set_reverse_direction_on", False)
-
-
-
-    # --- Light Action Callbacks ---
-
-    def actionEnableLightAuto(self, action, dev): # pylint: disable=invalid-name,unused-argument
+    # noinspection PyUnusedLocal
+    def actionEnableLightAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles enabling light auto mode"""
         self._dispatch_baf_command(dev, "async_set_light_auto_on", True)
 
-
-    def actionDisableLightAuto(self, action, dev): # pylint: disable=invalid-name,unused-argument
+    # noinspection PyUnusedLocal
+    def actionDisableLightAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles disabling light auto mode"""
         self._dispatch_baf_command(dev, "async_set_light_auto_on", False)
 
-
-    def actionControlColorTemperature(self, action, dev): # pylint: disable=invalid-name,unused-argument
+    def actionControlColorTemperature(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles setting light color temperature"""
         temp_k = action.actionValue
         warmth = int(((temp_k - 2700) / (6500 - 2700)) * 1000)
         warmth = max(0, min(1000, warmth))
         self._dispatch_baf_command(dev, "async_set_light_warmth", warmth)
-
-
-
-    # --- Shutdown and Cleanup ---
-
-    def shutdown(self):
-        """Called by Indigo when the plugin is globally disabled."""
-        self.logger.info("Plugin shutting down. Stopping background loop.")
-
-        # Stop all active fan connections and supervisors
-        for fan_id in list(self.active_connections.keys()):
-            self._stop_communication(fan_id)
-
-        # Stop discovery service
-        asyncio.run_coroutine_threadsafe(
-            self._stop_discovery_service(),
-            self.loop
-        )
-
-        # Stop background loop
-        self.loop.stop()
