@@ -19,7 +19,7 @@ import threading
 from typing import Any, Callable, Optional
 # noinspection PyUnresolvedReferences
 import indigo  # pylint: disable=import-error
-from aiobafi6 import (Device as BAFDevice, Service as BAFService)
+from aiobafi6 import (Device as BAFDevice, Service as BAFService, OffOnAuto)
 from device_discovery import BAFDeviceDiscoveryManager, ServiceId
 
 # Typing
@@ -30,10 +30,15 @@ DeviceMenuItem = tuple[ServiceId, str]
 FAN_DEVICE_TYPE = "bafFan"
 LIGHT_DEVICE_TYPE = "bafLight"
 
-# Indigo brightness is 0-100. BAF fan speed is 0-7 (approx 14% each step)
-SPEED_SCALE = 100.0 / 7.0
-# BAF light brightness is 0-16 (approx 6.25% each step)
-BRIGHTNESS_SCALE = 100.0 / 16.0
+# Indigo fan speed index is 0-3; BAF fan speed is 0-7
+INDIGO_SPEED_MAX_INDEX = 3.0
+BAF_SPEED_MAX = 7.0
+INDIGO_TO_BAF_SPEED_INDEX_RATIO = INDIGO_SPEED_MAX_INDEX / BAF_SPEED_MAX
+
+# Indigo light brightness is 0-100; BAF light brightness is 0-16
+INDIGO_BRIGHTNESS_MAX = 100.0
+BAF_BRIGHTNESS_MAX = 16.0
+INDIGO_TO_BAF_BRIGHTNESS_RATIO = INDIGO_BRIGHTNESS_MAX / BAF_BRIGHTNESS_MAX
 
 # Service ID for manual IP/Port entry
 SERVICE_ID_MANUAL = "manual"
@@ -230,9 +235,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     # noinspection PyUnusedLocal
     def validateDeviceConfigUi(self, valuesDict, typeId, devId):  # pylint: disable=invalid-name,unused-argument
         """Called by Indigo to validate the device configuration"""
-        self.logger.debug(
-            f"Validating config for device {devId}: {valuesDict}"
-        )
         errors = indigo.Dict()
 
         ip_address = self._get_ip_address_from_config(valuesDict)
@@ -275,6 +277,12 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             dev.setErrorStateOnServer("invalid configuration")
             return
 
+        # Update fan properties
+        props = dict(dev.pluginProps)
+        props["supportsAllOff"] = True
+        props["supportsStatusRequest"] = False
+        dev.replacePluginPropsOnServer(props)
+
         # First, cancel any existing supervisor for this fan to be safe
         self._stop_baf_connection(dev.id)
 
@@ -283,12 +291,11 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             f"Starting communication with '{dev.name}' at {dev.address}"
         )
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._start_baf_connection(dev.id, service),
-                self.event_loop
-            )
             with self._lock:
-                self.baf_connections[dev.id] = future
+                self.baf_connections[dev.id] = asyncio.run_coroutine_threadsafe(
+                    self._start_baf_connection(dev.id, service),
+                    self.event_loop
+                )
         except Exception as ex:  # pylint: disable=broad-exception-caught
             self.logger.exception(f"Failed to start communication with {dev.id}: {ex}")
             dev.setErrorStateOnServer("connection failed")
@@ -315,6 +322,11 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     del self.light_to_fan_map[dev.id]
 
 
+    def didDeviceCommPropertyChange(self, origDev, newDev):  # pylint: disable=invalid-name
+        """Called by Indigo when a device property changes to see if comm needs to restart."""
+        return newDev.deviceTypeId == FAN_DEVICE_TYPE and origDev.address != newDev.address
+
+
     # Parse device configuration
 
     def _get_ip_address_from_config(self, values_dict: dict) -> Optional[str]:
@@ -325,11 +337,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             ip_address = values_dict.get("manual_address")
             if ip_address:
                 try:
-                    # Run hostname lookup in a separate thread to avoid blocking the UI
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(socket.gethostbyname, ip_address)
-                        future.result(timeout=2.0)
-                except (socket.gaierror, concurrent.futures.TimeoutError) as ex:
+                    socket.gethostbyname(ip_address)
+                except socket.gaierror as ex:
                     self.logger.exception(f"Unable to validate IP address {ip_address}: {ex}")
                     ip_address = None
 
@@ -427,8 +436,10 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 except asyncio.CancelledError:  # pylint:disable=try-except-raise
                     # Propagate cancellation
                     raise
-                except Exception:  # pylint: disable=broad-exception-caught
-                    self.logger.warning(f"Reconnecting to Fan ID {fan_id} in {backoff} seconds...")
+                except Exception as ex:  # pylint: disable=broad-exception-caught
+                    self.logger.exception(
+                        f"Reconnecting to Fan ID {fan_id} in {backoff} seconds: {ex}"
+                    )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, max_backoff)
 
@@ -445,20 +456,20 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     def _stop_baf_connection(self, fan_id: DeviceId) -> None:
         """Centralized cleanup for stopping a specific hardware connection."""
         with self._lock:
-            self.fan_availability.pop(fan_id, None)
-            task = self.baf_connections.pop(fan_id, None)
-            baf = self.fan_to_baf_map.pop(fan_id, None)
-            if baf:
-                self.baf_to_fan_map.pop(baf, None)
-
+            task = self.baf_connections.get(fan_id)
         if task:
             self.logger.debug(f"Canceling connection for Fan ID {fan_id}")
             try:
                 task.cancel()
             except Exception as ex:  # pylint: disable=broad-exception-caught
                 self.logger.exception(f"Failed to cancel task for Fan ID {fan_id}: {ex}")
-        else:
-            self.logger.debug(f"No task for Fan ID {fan_id}, connection may already be stopped")
+
+        with self._lock:
+            self.fan_availability.pop(fan_id, None)
+            self.baf_connections.pop(fan_id, None)
+            baf = self.fan_to_baf_map.pop(fan_id, None)
+            if baf:
+                self.baf_to_fan_map.pop(baf, None)
 
         self._add_device_operation(lambda: self._update_error_state(fan_id, "offline"))
 
@@ -491,7 +502,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             baf.remove_callback(self._baf_state_callback)
             self.logger.warning(f"Connection closed for Fan ID {fan_id} at {service_id}")
             self._add_device_operation(lambda: self._update_error_state(fan_id, "offline"))
-            raise ConnectionAbortedError("Connection was closed")
 
 
     def _baf_state_callback(self, baf_device: BAFDevice) -> None:
@@ -551,6 +561,20 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 folder=fan_dev.folderId
             )
 
+            # Update light properties
+            props = dict(new_light.pluginProps)
+            props["supportsAllLightsOnOff"] = True
+            props["supportsAllOff"] = True
+            props["SupportsColor"] = False
+            props["supportsRGB"] = False
+            props["supportsRGBandWhiteSimultaneously"] = False
+            props["supportsStatusRequest"] = False
+            props["supportsTwoWhiteLevels"] = False
+            props["supportsTwoWhiteLevelsSimultaneously"] = False
+            props["supportsWhite"] = False
+            props["supportsWhiteTemperature"] = True
+            new_light.replacePluginPropsOnServer(props)
+
             # Update fan properties
             props = dict(fan_dev.pluginProps)
             props["child_light_id"] = new_light.id
@@ -584,13 +608,18 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Maps BAF properties to native and custom Indigo device states."""
         self._update_device_available(fan_dev, baf_dev.available)
         if baf_dev.available:
+            speed_index = int(min(baf_dev.speed * INDIGO_TO_BAF_SPEED_INDEX_RATIO,
+                                  INDIGO_SPEED_MAX_INDEX))
+            on_off_state = baf_dev.speed > 0
+            auto_mode = baf_dev.fan_mode == OffOnAuto.AUTO
             states = [
-                {'key': 'speed', 'value': baf_dev.speed},
-                {'key': 'onOffState', 'value': baf_dev.fan_on},
-                {'key': 'auto_mode', 'value': baf_dev.fan_auto_on},
-                {'key': 'whoosh_mode', 'value': baf_dev.whoosh_mode_on},
-                {'key': 'eco_mode', 'value': baf_dev.eco_mode_on},
-                {'key': 'reverse_direction', 'value': baf_dev.reverse_direction_on}
+                {'key': 'speedIndex', 'value': speed_index},
+                {'key': 'speedLevel', 'value': baf_dev.speed_percent},
+                {'key': 'onOffState', 'value': on_off_state},
+                {'key': 'auto_mode', 'value': auto_mode},
+                {'key': 'whoosh_mode', 'value': baf_dev.whoosh_enable},
+                {'key': 'eco_mode', 'value': baf_dev.eco_enable},
+                {'key': 'reverse_direction', 'value': baf_dev.reverse_enable}
             ]
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(fan_dev, states)
@@ -610,12 +639,15 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Maps BAF properties to native and custom Indigo device states."""
         self._update_device_available(light_dev, baf_dev.available)
         if baf_dev.available:
+            brightness = int(min(baf_dev.light_brightness_level * INDIGO_TO_BAF_BRIGHTNESS_RATIO,
+                                 INDIGO_BRIGHTNESS_MAX))
+            on_off_state = brightness > 0
+            auto_mode = baf_dev.light_mode == OffOnAuto.AUTO
             states = [
-                {'key': 'onOffState', 'value': baf_dev.light_on},
-                {'key': 'brightness',
-                 'value': (baf_dev.light_brightness * BRIGHTNESS_SCALE)},
-                {'key': 'auto_mode', 'value': baf_dev.light_auto_on},
-                {'key': 'warmth', 'value': baf_dev.light_warmth}
+                {'key': 'onOffState', 'value': on_off_state},
+                {'key': 'brightnessLevel', 'value': brightness},
+                {'key': 'auto_mode', 'value': auto_mode},
+                {'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature}
             ]
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(light_dev, states)
@@ -660,125 +692,189 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         return None
 
 
-    def _dispatch_baf_command(self, dev: indigo.Device, baf_method: str, *args: Any) -> bool:
+    def _set_device_property(self, dev: indigo.Device, baf_property: str, baf_value: Any) -> None:
         """
-        Retrieves the correct BAF instance and dispatches an
-        asynchronous command to the background loop.
+        Retrieves the correct BAF instance and sets a property on it in the background.
         """
         baf = self._get_baf_instance(dev)
         if not baf:
             self.logger.error(
-                f"Command {baf_method} failed: '{dev.name}' is offline or not linked."
+                f"Command {baf_property} failed: '{dev.name}' is offline or not linked."
             )
-            return False
 
-        # Dynamically get the method from the BAF instance and schedule it
-        method = getattr(baf, baf_method, None)
-        if method:
-            self.logger.debug(f"Dispatching {baf_method} for '{dev.name}'")
+        elif hasattr(baf, baf_property):
+            self.logger.debug(
+                f"Scheduling set property {baf_property} for {dev.name} to {baf_value}"
+            )
 
             try:
-                future = asyncio.run_coroutine_threadsafe(method(*args), self.event_loop)
-                future.add_done_callback(self._handle_dispatch_baf_command_async_result)
-                return True
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_set_baf_device_property(baf, baf_property, baf_value),
+                    self.event_loop
+                )
             except RuntimeError:
                 self.logger.error(
-                    f"Failed to schedule command {baf_method}: event loop is not running."
+                    f"Failed to schedule property set {baf_property}: event loop is not running."
                 )
-                return False
 
-        self.logger.error(f"Invalid hardware method: {baf_method} for '{dev.name}'")
-        return False
+        else:
+            self.logger.error(f"Invalid property: {baf_property} for '{dev.name}'")
 
 
-    def _handle_dispatch_baf_command_async_result(self, fut):
+    async def _handle_set_baf_device_property(self, baf: BAFDevice, baf_property: str,
+                                              baf_value: Any) -> None:
+        self.logger.debuf(f"Setting property {baf_property} for {baf.name} to {baf_value}")
         try:
-            fut.result()
+            setattr(baf, baf_property, baf_value)
         except Exception as ex:  # pylint: disable=broad-exception-caught
-            self.logger.exception(f"Dispatch command failed with exception: {ex}")
+            self.logger.exception(
+                f"Set property {baf_property} for {baf.name} to {baf_value} failed with exception: {ex}"  # pylint: disable=line-too-long
+            )
 
 
     # --- Fan Action Callbacks ---
 
     def actionControlSpeedControl(self, action, dev):  # pylint: disable=invalid-name
         """Handles standard Indigo Fan actions (On/Off/Speed)."""
+        if dev.deviceTypeId != FAN_DEVICE_TYPE:
+            return
+
         if action.speedControlAction == indigo.kSpeedControlAction.TurnOn:
-            self._dispatch_baf_command(dev, "async_set_fan_on", True)
+            self._set_device_property(dev, "fan_mode", OffOnAuto.ON)
         elif action.speedControlAction == indigo.kSpeedControlAction.TurnOff:
-            self._dispatch_baf_command(dev, "async_set_fan_on", False)
+            self._set_device_property(dev, "fan_mode", OffOnAuto.OFF)
+        elif action.speedControlAction == indigo.kSpeedControlAction.Toggle:
+            self._toggle_fan_on_off_state(dev)
         elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedIndex:
-            speed = action.actionValue
-            self._dispatch_baf_command(dev, "async_set_speed", speed)
+            speed = int(min(action.actionValue / INDIGO_TO_BAF_SPEED_INDEX_RATIO, BAF_SPEED_MAX))
+            self._set_device_property(dev, "speed", speed)
         elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedLevel:
-            speed = int(action.actionValue / SPEED_SCALE)
-            self._dispatch_baf_command(dev, "async_set_speed", speed)
+            self._set_device_property(dev, "speed_percent", action.actionValue)
+        elif action.speedControlAction == indigo.kSpeedControlAction.IncreaseSpeedIndex:
+            self._adjust_fan_speed_index(dev, 1)
+        elif action.speedControlAction == indigo.kSpeedControlAction.DecreaseSpeedIndex:
+            self._adjust_fan_speed_index(dev, -1)
 
     # noinspection PyUnusedLocal
     def actionEnableFanAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan auto mode"""
-        self._dispatch_baf_command(dev, "async_set_fan_auto_on", True)
+        self._set_device_property(dev, "fan_mode", OffOnAuto.AUTO)
 
-    # noinspection PyUnusedLocal
-    def actionDisableFanAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
-        """Handles disabling fan auto mode"""
-        self._dispatch_baf_command(dev, "async_set_fan_auto_on", False)
-
-    # noinspection PyUnusedLocal
+   # noinspection PyUnusedLocal
     def actionEnableWhoosh(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan whoosh mode"""
-        self._dispatch_baf_command(dev, "async_set_whoosh_mode_on", True)
+        self._set_device_property(dev, "whoosh_enable", True)
 
     # noinspection PyUnusedLocal
     def actionDisableWhoosh(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan whoosh mode"""
-        self._dispatch_baf_command(dev, "async_set_whoosh_mode_on", False)
+        self._set_device_property(dev, "whoosh_enable", False)
 
     # noinspection PyUnusedLocal
     def actionEnableEco(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan eco mode"""
-        self._dispatch_baf_command(dev, "async_set_eco_mode_on", True)
+        self._set_device_property(dev, "eco_enable", True)
 
     # noinspection PyUnusedLocal
     def actionDisableEco(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan eco mode"""
-        self._dispatch_baf_command(dev, "async_set_eco_mode_on", False)
+        self._set_device_property(dev, "eco_enable", False)
 
     # noinspection PyUnusedLocal
     def actionEnableReverse(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan reverse direction"""
-        self._dispatch_baf_command(dev, "async_set_reverse_direction_on", True)
+        self._set_device_property(dev, "reverse_enable", True)
 
     # noinspection PyUnusedLocal
     def actionDisableReverse(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan reverse direction"""
-        self._dispatch_baf_command(dev, "async_set_reverse_direction_on", False)
+        self._set_device_property(dev, "reverse_enable", False)
+
+    def _toggle_fan_on_off_state(self, dev: indigo.Device) -> None:
+        """Handles toggling fan on/off"""
+        baf = self._get_baf_instance(dev)
+        if baf:
+            if baf.fan_mode != OffOnAuto.AUTO:
+                new_mode = OffOnAuto.OFF if baf.fan_mode == OffOnAuto.ON else OffOnAuto.ON
+                self._set_device_property(dev, "fan_mode", new_mode)
+        else:
+            self.logger.error(
+                f"Command fan toggle failed: '{dev.name}' is offline or not linked."
+            )
+
+    def _adjust_fan_speed_index(self, dev: indigo.Device, delta: int) -> None:
+        """Handles increasing or decreasing fan speed index"""
+        baf = self._get_baf_instance(dev)
+        if baf:
+            new_speed = int(max(0.0, min(BAF_SPEED_MAX, baf.speed + delta)))
+            self._set_device_property(dev, "speed", new_speed)
+        else:
+            self.logger.error(
+                f"Command adjust fan speed failed: '{dev.name}' is offline or not linked."
+            )
 
 
     # --- Light Action Callbacks ---
 
-    def actionControlDimmerRelay(self, action, dev):  # pylint: disable=invalid-name
-        """Handles standard Indigo Light actions (On/Off/Brightness)."""
-        if action.deviceAction == indigo.kDeviceAction.TurnOn:
-            self._dispatch_baf_command(dev, "async_set_light_on", True)
-        elif action.deviceAction == indigo.kDeviceAction.TurnOff:
-            self._dispatch_baf_command(dev, "async_set_light_on", False)
-        elif action.deviceAction == indigo.kDeviceAction.SetBrightness:
-            brightness = int(action.actionValue / BRIGHTNESS_SCALE)
-            self._dispatch_baf_command(dev, "async_set_light_brightness", brightness)
+    def actionControlDevice(self, action, dev):  # pylint: disable=invalid-name,too-many-branches
+        """Handles standard Indigo Device actions (On/Off/Brightness/Color)."""
+        if dev.deviceTypeId == FAN_DEVICE_TYPE:
+            if action.deviceAction == indigo.kDeviceAction.TurnOn:
+                self._set_device_property(dev, "fan_mode", OffOnAuto.ON)
+            elif action.deviceAction == indigo.kDeviceAction.TurnOff:
+                self._set_device_property(dev, "fan_mode", OffOnAuto.OFF)
+            elif action.deviceAction == indigo.kDeviceAction.AllOff:
+                self._set_device_property(dev, "fan_mode", OffOnAuto.OFF)
+            elif action.deviceAction == indigo.kDeviceAction.Toggle:
+                self._toggle_fan_on_off_state(dev)
+        elif dev.deviceTypeId == LIGHT_DEVICE_TYPE:
+            if action.deviceAction == indigo.kDeviceAction.TurnOn:
+                self._set_device_property(dev, "light_mode", OffOnAuto.ON)
+            elif action.deviceAction == indigo.kDeviceAction.AllLightsOn:
+                self._set_device_property(dev, "light_mode", OffOnAuto.ON)
+            elif action.deviceAction == indigo.kDeviceAction.TurnOff:
+                self._set_device_property(dev, "light_mode", OffOnAuto.OFF)
+            elif action.deviceAction == indigo.kDeviceAction.AllLightsOff:
+                self._set_device_property(dev, "light_mode", OffOnAuto.OFF)
+            elif action.deviceAction == indigo.kDeviceAction.AllOff:
+                self._set_device_property(dev, "light_mode", OffOnAuto.OFF)
+            elif action.deviceAction == indigo.kDeviceAction.Toggle:
+                self._toggle_light_on_off_state(dev)
+            elif action.deviceAction == indigo.kDeviceAction.SetBrightness:
+                brightness = int(min(action.actionValue / INDIGO_TO_BAF_BRIGHTNESS_RATIO,
+                                     BAF_BRIGHTNESS_MAX))
+                self._set_device_property(dev, "light_brightness_level", brightness)
+            elif action.deviceAction == indigo.kDeviceAction.BrightenBy:
+                self._adjust_light_brightness(dev, action.actionValue)
+            elif action.deviceAction == indigo.kDeviceAction.DimBy:
+                self._adjust_light_brightness(dev, -1.0 * action.actionValue)
+            elif action.deviceAction == indigo.kDeviceAction.SetColorLevels:
+                self._set_device_property(dev, "light_color_temperature", action.actionValue)
 
     # noinspection PyUnusedLocal
     def actionEnableLightAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
         """Handles enabling light auto mode"""
-        self._dispatch_baf_command(dev, "async_set_light_auto_on", True)
+        self._set_device_property(dev, "light_mode", OffOnAuto.AUTO)
 
-    # noinspection PyUnusedLocal
-    def actionDisableLightAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
-        """Handles disabling light auto mode"""
-        self._dispatch_baf_command(dev, "async_set_light_auto_on", False)
+    def _toggle_light_on_off_state(self, dev: indigo.Device) -> None:
+        """Handles toggling light on/off"""
+        baf = self._get_baf_instance(dev)
+        if baf:
+            if baf.light_mode != OffOnAuto.AUTO:
+                new_mode = OffOnAuto.OFF if baf.light_mode == OffOnAuto.ON else OffOnAuto.ON
+                self._set_device_property(dev, "light_mode", new_mode)
+        else:
+            self.logger.error(
+                f"Command fan toggle failed: '{dev.name}' is offline or not linked."
+            )
 
-    def actionControlColorTemperature(self, action, dev):  # pylint: disable=invalid-name,unused-argument
-        """Handles setting light color temperature"""
-        temp_k = action.actionValue
-        warmth = int(((temp_k - 2700) / (6500 - 2700)) * 1000)
-        warmth = max(0, min(1000, warmth))
-        self._dispatch_baf_command(dev, "async_set_light_warmth", warmth)
+    def _adjust_light_brightness(self, dev: indigo.Device, delta: int) -> None:
+        """Handles increasing or decreasing light brightness"""
+        baf = self._get_baf_instance(dev)
+        if baf:
+            new_brightness = int(max(0.0, min(100.0, baf.light_brightness_percent + delta)))
+            self._set_device_property(dev, "light_brightness_level", new_brightness)
+        else:
+            self.logger.error(
+                f"Command adjust fan speed failed: '{dev.name}' is offline or not linked."
+            )

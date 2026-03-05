@@ -124,3 +124,6 @@ dmypy.json
 
 # Other
 /aficons
+
+# Release zip
+/BAFControl.indigoPlugin.zip

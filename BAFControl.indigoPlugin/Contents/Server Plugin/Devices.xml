@@ -21,6 +21,15 @@
                 <Label>Manual Port:</Label>
                 <Hint>Enter the Port Number (default is 31415)</Hint>
             </Field>
+            <Field id="spacing_label1" type="label">
+	            <Label> </Label>
+            </Field>
+            <Field id="spacing_label2" type="label">
+	            <Label> </Label>
+            </Field>
+            <Field id="spacing_label3" type="label">
+	            <Label> </Label>
+            </Field>
         </ConfigUI>
         <States>
             <!-- Reference to the automatically created light child -->
@@ -53,9 +62,9 @@
         </States>
     </Device>
 
-    <!-- Child Device: Managed by bafFan; hidden from 'New Device' menu -->
-    <Device id="bafLight" type="dimmer" icon="light"  allowUserCreation="false">
-        <Name>Big Ass Fan [Light]</Name>
+    <!-- Child Device: Managed by fan; hidden from 'New Device' menu -->
+    <Device id="bafLight" type="dimmer" subType="kDimmerDeviceSubType.ColorDimmer" icon="light" allowUserCreation="false">
+        <Name>BAF/Haiku Fan Light</Name>
         <ConfigUI>
             <Field id="info_label" type="label">
                 <Label>This device is managed automatically by the parent Fan device.</Label>
@@ -66,11 +75,6 @@
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Light Auto Mode Changed</TriggerLabel>
                 <ControlPageLabel>Light Auto Mode</ControlPageLabel>
-            </State>
-            <State id="warmth">
-                <ValueType>Integer</ValueType>
-                <TriggerLabel>Light Warmth Changed</TriggerLabel>
-                <ControlPageLabel>Light Warmth</ControlPageLabel>
             </State>
         </States>
     </Device>

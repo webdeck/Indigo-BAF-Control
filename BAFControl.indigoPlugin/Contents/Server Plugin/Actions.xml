@@ -7,10 +7,6 @@
         <Name>Enable Fan Auto Mode</Name>
         <CallbackMethod>actionEnableFanAuto</CallbackMethod>
     </Action>
-    <Action id="disableFanAuto" deviceTypeId="bafFan">
-        <Name>Disable Fan Auto Mode</Name>
-        <CallbackMethod>actionDisableFanAuto</CallbackMethod>
-    </Action>
 
     <!-- Whoosh Mode -->
     <Action id="enableWhoosh" deviceTypeId="bafFan">
@@ -49,10 +45,6 @@
     <Action id="enableLightAuto" deviceTypeId="bafLight">
         <Name>Enable Light Auto Mode</Name>
         <CallbackMethod>actionEnableLightAuto</CallbackMethod>
-    </Action>
-    <Action id="disableLightAuto" deviceTypeId="bafLight">
-        <Name>Disable Light Auto Mode</Name>
-        <CallbackMethod>actionDisableLightAuto</CallbackMethod>
     </Action>
 
     <!-- Light Color Temperature (Kelvin) -->
