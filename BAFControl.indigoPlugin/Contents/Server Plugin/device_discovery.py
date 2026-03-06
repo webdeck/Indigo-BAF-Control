@@ -19,7 +19,7 @@ ServiceId = str
 class BAFDeviceDiscoveryManager:
     """Manages device discovery for BAF devices using ServiceBrowser."""
 
-    def __init__(self, logger: logging.Logger):
+    def __init__(self, logger: logging.Logger) -> None:
         """Initialize the discovery manager with a reference to the logger to use."""
         self.logger = logger
         self.azc: Optional[AsyncZeroconf] = None

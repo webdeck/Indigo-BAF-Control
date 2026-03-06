@@ -52,7 +52,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     # --- Plugin Lifecycle ---
 
-    def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):  # pylint: disable=invalid-name
+    def __init__(self, pluginId: str, pluginDisplayName: str, pluginVersion: str,  # pylint: disable=invalid-name
+                 pluginPrefs: dict) -> None:  # pylint: disable=invalid-name
         """Initialize plugin and data structures."""
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self._set_log_level(pluginPrefs)
@@ -71,7 +72,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         self._stop_device_ops_event = threading.Event()
 
 
-    def startup(self):
+    def startup(self) -> None:
         """Called by Indigo wwhen the plugin is enabled."""
         self.logger.info("Starting BAFControl Plugin...")
 
@@ -92,13 +93,13 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         self.logger.info("BAFControl Plugin started.")
 
 
-    def closedPrefsConfigUi(self, valuesDict, userCancelled):  # pylint: disable=invalid-name
+    def closedPrefsConfigUi(self, valuesDict: dict, userCancelled: bool) -> None:  # pylint: disable=invalid-name
         """Called by Indigo when the plugin preferences dialog is closed"""
         if not userCancelled:
             self._set_log_level(valuesDict)
 
 
-    def runConcurrentThread(self):  # pylint: disable=invalid-name
+    def runConcurrentThread(self) -> None:  # pylint: disable=invalid-name
         """Called by Indigo when the plugin is enabled."""
         self.logger.info("Started device operations processor thread.")
         self._stop_device_ops_event.clear()
@@ -118,13 +119,13 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self.logger.info("Stopped device operations processor thread.")
 
 
-    def stopConcurrentThread(self):  # pylint: disable=invalid-name
+    def stopConcurrentThread(self) -> None:  # pylint: disable=invalid-name
         """Called by Indigo when the plugin is disabled."""
         self.logger.info("Stopping device operations processor thread...")
         self._stop_device_ops_event.set()
 
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Called by Indigo when the plugin is disabled."""
         self.logger.info("Shutting down BAFControl Plugin...")
 
@@ -217,7 +218,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     # --- Device Configuration Callbacks ---
 
     # noinspection PyShadowingBuiltins,PyUnusedLocal
-    def getDiscoveredDevices(self, filter="", valuesDict=None, typeId="", targetId=0):  # pylint: disable=invalid-name,unused-argument,redefined-builtin
+    def getDiscoveredDevices(self, filter: str = "", valuesDict: Optional[dict] = None,  # pylint: disable=invalid-name,unused-argument,redefined-builtin
+                             typeId: str = "", targetId: int = 0) -> list[DeviceMenuItem]:  # pylint: disable=invalid-name,unused-argument,redefined-builtin
         """Populates the ConfigUI with verified BAF devices."""
         items: list[DeviceMenuItem] = []
         for service_id, service in self.discovery_manager.discovered_services.items():
@@ -233,7 +235,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
 
     # noinspection PyUnusedLocal
-    def validateDeviceConfigUi(self, valuesDict, typeId, devId):  # pylint: disable=invalid-name,unused-argument
+    def validateDeviceConfigUi(self, valuesDict: dict, typeId: str,  # pylint: disable=invalid-name,unused-argument
+                               devId: int) -> tuple[bool, dict, indigo.Dict]:  # pylint: disable=invalid-name,unused-argument
         """Called by Indigo to validate the device configuration"""
         errors = indigo.Dict()
 
@@ -261,12 +264,12 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             f"Valid config for device {devId}: {valuesDict}"
         )
         # noinspection PyRedundantParentheses
-        return (True, valuesDict)
+        return (True, valuesDict, errors)
 
 
     # Device Lifecycle
 
-    def deviceStartComm(self, dev):  # pylint: disable=invalid-name
+    def deviceStartComm(self, dev: indigo.Device) -> None:  # pylint: disable=invalid-name
         """Called by Indigo when a device is enabled."""
         if dev.deviceTypeId != FAN_DEVICE_TYPE:
             return
@@ -301,7 +304,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             dev.setErrorStateOnServer("connection failed")
 
 
-    def deviceStopComm(self, dev):  # pylint: disable=invalid-name
+    def deviceStopComm(self, dev: indigo.Device) -> None:  # pylint: disable=invalid-name
         """Called by Indigo when a device is disabled."""
         if dev.deviceTypeId == FAN_DEVICE_TYPE:
             # First stop the connection supervisor and cleanup
@@ -321,8 +324,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 if dev.id in self.light_to_fan_map:
                     del self.light_to_fan_map[dev.id]
 
-
-    def didDeviceCommPropertyChange(self, origDev, newDev):  # pylint: disable=invalid-name
+    # noinspection PyMethodMayBeStatic
+    def didDeviceCommPropertyChange(self, origDev: indigo.Device, newDev: indigo.Device) -> bool:  # pylint: disable=invalid-name
         """Called by Indigo when a device property changes to see if comm needs to restart."""
         return newDev.deviceTypeId == FAN_DEVICE_TYPE and origDev.address != newDev.address
 
@@ -386,21 +389,25 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     def _get_service_from_config(self, values_dict: dict) -> Optional[BAFService]:
         """Gets the Service object from the config, or None if invalid."""
         service: Optional[BAFService] = None
-        service_id: ServiceId = values_dict.get("selected_device")
-        if service_id == SERVICE_ID_MANUAL:
-            ip_address  = self._get_ip_address_from_config(values_dict)
-            port = self._get_port_from_config(values_dict)
-            if ip_address and port:
-                service = BAFService([ip_address], port)
-                service_id = self.discovery_manager.get_service_id(service)
-                if service_id:
-                    self.discovery_manager.add_service_by_id(service, service_id)
-            else:
-                self.logger.error("Manual address and/or port configuration is invalid")
+        address = values_dict.get("address")
+        if address:
+            service = address
         else:
-            service = self.discovery_manager.get_service_by_id(service_id)
-            if not service:
-                self.logger.error(f"Unable to find selected device {service_id}")
+            service_id: ServiceId = values_dict.get("selected_device")
+            if service_id == SERVICE_ID_MANUAL:
+                ip_address  = self._get_ip_address_from_config(values_dict)
+                port = self._get_port_from_config(values_dict)
+                if ip_address and port:
+                    service = BAFService([ip_address], port)
+                    service_id = self.discovery_manager.get_service_id(service)
+                    if service_id:
+                        self.discovery_manager.add_service_by_id(service, service_id)
+                else:
+                    self.logger.error("Manual address and/or port configuration is invalid")
+            else:
+                service = self.discovery_manager.get_service_by_id(service_id)
+                if not service:
+                    self.logger.error(f"Unable to find selected device {service_id}")
 
         return service
 
@@ -723,7 +730,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     async def _handle_set_baf_device_property(self, baf: BAFDevice, baf_property: str,
                                               baf_value: Any) -> None:
-        self.logger.debuf(f"Setting property {baf_property} for {baf.name} to {baf_value}")
+        self.logger.debug(f"Setting property {baf_property} for {baf.name} to {baf_value}")
         try:
             setattr(baf, baf_property, baf_value)
         except Exception as ex:  # pylint: disable=broad-exception-caught
@@ -734,7 +741,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     # --- Fan Action Callbacks ---
 
-    def actionControlSpeedControl(self, action, dev):  # pylint: disable=invalid-name
+    def actionControlSpeedControl(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name
         """Handles standard Indigo Fan actions (On/Off/Speed)."""
         if dev.deviceTypeId != FAN_DEVICE_TYPE:
             return
@@ -756,37 +763,37 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self._adjust_fan_speed_index(dev, -1)
 
     # noinspection PyUnusedLocal
-    def actionEnableFanAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionEnableFanAuto(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan auto mode"""
         self._set_device_property(dev, "fan_mode", OffOnAuto.AUTO)
 
    # noinspection PyUnusedLocal
-    def actionEnableWhoosh(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionEnableWhoosh(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan whoosh mode"""
         self._set_device_property(dev, "whoosh_enable", True)
 
     # noinspection PyUnusedLocal
-    def actionDisableWhoosh(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionDisableWhoosh(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan whoosh mode"""
         self._set_device_property(dev, "whoosh_enable", False)
 
     # noinspection PyUnusedLocal
-    def actionEnableEco(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionEnableEco(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan eco mode"""
         self._set_device_property(dev, "eco_enable", True)
 
     # noinspection PyUnusedLocal
-    def actionDisableEco(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionDisableEco(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan eco mode"""
         self._set_device_property(dev, "eco_enable", False)
 
     # noinspection PyUnusedLocal
-    def actionEnableReverse(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionEnableReverse(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles enabling fan reverse direction"""
         self._set_device_property(dev, "reverse_enable", True)
 
     # noinspection PyUnusedLocal
-    def actionDisableReverse(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionDisableReverse(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles disabling fan reverse direction"""
         self._set_device_property(dev, "reverse_enable", False)
 
@@ -816,7 +823,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     # --- Light Action Callbacks ---
 
-    def actionControlDevice(self, action, dev):  # pylint: disable=invalid-name,too-many-branches
+    def actionControlDevice(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,too-many-branches
         """Handles standard Indigo Device actions (On/Off/Brightness/Color)."""
         if dev.deviceTypeId == FAN_DEVICE_TYPE:
             if action.deviceAction == indigo.kDeviceAction.TurnOn:
@@ -852,7 +859,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 self._set_device_property(dev, "light_color_temperature", action.actionValue)
 
     # noinspection PyUnusedLocal
-    def actionEnableLightAuto(self, action, dev):  # pylint: disable=invalid-name,unused-argument
+    def actionEnableLightAuto(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
         """Handles enabling light auto mode"""
         self._set_device_property(dev, "light_mode", OffOnAuto.AUTO)
 
