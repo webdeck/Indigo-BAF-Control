@@ -13,22 +13,13 @@
                 <List class="self" method="getDiscoveredDevices" />
             </Field>
 
-            <Field id="manual_address" type="textfield" visibleBindingId="selected_device" visibleBindingValue="manual">
+            <Field id="manual_address" type="textfield" visibleBindingId="selected_device" visibleBindingValue="manual" alwaysUseInDialogHeightCalc="true">
                 <Label>Manual Address:</Label>
                 <Hint>Enter the IP Address or Hostname</Hint>
             </Field>
-            <Field id="manual_port" type="textfield" defaultValue="31415" visibleBindingId="selected_device" visibleBindingValue="manual">
+            <Field id="manual_port" type="textfield" defaultValue="31415" visibleBindingId="selected_device" visibleBindingValue="manual" alwaysUseInDialogHeightCalc="true">
                 <Label>Manual Port:</Label>
                 <Hint>Enter the Port Number (default is 31415)</Hint>
-            </Field>
-            <Field id="spacing_label1" type="label">
-	            <Label> </Label>
-            </Field>
-            <Field id="spacing_label2" type="label">
-	            <Label> </Label>
-            </Field>
-            <Field id="spacing_label3" type="label">
-	            <Label> </Label>
             </Field>
         </ConfigUI>
         <States>

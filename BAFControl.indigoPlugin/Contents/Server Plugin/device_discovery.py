@@ -69,6 +69,21 @@ class BAFDeviceDiscoveryManager:
                 return f"{ip_address}:{port}"
         return None
 
+    @staticmethod
+    def create_service_from_id(service_id: ServiceId) -> Optional[Service]:
+        """Create a Service object from a ServiceId, returns None if invalid"""
+        service = None
+        i = service_id.rfind(":")
+        if 0 < i < len(service_id) - 1:
+            ip_address = service_id[0:i]
+            try:
+                port = int(service_id[i+1:])
+                service = Service([ip_address], port)
+            except ValueError:
+                pass
+
+        return service
+
 
     def get_service_by_id(self, service_id: ServiceId) -> Optional[Service]:
         """Retrieve a service by its ID."""

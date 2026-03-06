@@ -391,20 +391,17 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         service: Optional[BAFService] = None
         address = values_dict.get("address")
         if address:
-            service = address
+            service = self.discovery_manager.create_service_from_id(address)
         else:
-            service_id: ServiceId = values_dict.get("selected_device")
+            service_id: Optional[ServiceId] = values_dict.get("selected_device")
             if service_id == SERVICE_ID_MANUAL:
                 ip_address  = self._get_ip_address_from_config(values_dict)
                 port = self._get_port_from_config(values_dict)
                 if ip_address and port:
                     service = BAFService([ip_address], port)
-                    service_id = self.discovery_manager.get_service_id(service)
-                    if service_id:
-                        self.discovery_manager.add_service_by_id(service, service_id)
                 else:
                     self.logger.error("Manual address and/or port configuration is invalid")
-            else:
+            elif service_id:
                 service = self.discovery_manager.get_service_by_id(service_id)
                 if not service:
                     self.logger.error(f"Unable to find selected device {service_id}")
@@ -513,12 +510,13 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     def _baf_state_callback(self, baf_device: BAFDevice) -> None:
         """Handles callback from all BAF devices"""
+        self.logger.debug("Callback received for fan {baf_device.name}")
         with self._lock:
             fan_id: Optional[DeviceId] = self.baf_to_fan_map.get(baf_device)
         if fan_id:
             self._handle_baf_state_callback(baf_device, fan_id)
         else:
-            self.logger.debug("Unable to find fan_id for BAF device callback")
+            self.logger.debug("Unable to find fan_id for BAF device {baf_device.name}")
 
 
     def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:
@@ -626,11 +624,51 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 {'key': 'auto_mode', 'value': auto_mode},
                 {'key': 'whoosh_mode', 'value': baf_dev.whoosh_enable},
                 {'key': 'eco_mode', 'value': baf_dev.eco_enable},
-                {'key': 'reverse_direction', 'value': baf_dev.reverse_enable}
+                {'key': 'reverse_direction', 'value': baf_dev.reverse_enable},
+                {'key': 'has_any_light', 'value': baf_dev.has_any_light},
+                {'key': 'has_auto_comfort', 'value': baf_dev.has_auto_comfort},
+                {'key': 'has_occupancy', 'value': baf_dev.has_occupancy},
+                {'key': 'auto_comfort', 'value': baf_dev.auto_comfort_enable},
+                {'key': 'comfort_ideal_temperature', 'value': baf_dev.comfort_ideal_temperature},
+                {'key': 'comfort_heat_assist_enable', 'value': baf_dev.comfort_heat_assist_enable},
+                {'key': 'comfort_heat_assist_speed', 'value': baf_dev.comfort_heat_assist_speed},
+                {'key': 'comfort_heat_assist_reverse',
+                 'value': baf_dev.comfort_heat_assist_reverse_enable},
+                {'key': 'comfort_min_speed', 'value': baf_dev.comfort_min_speed},
+                {'key': 'comfort_max_speed', 'value': baf_dev.comfort_max_speed},
+                {'key': 'motion_sense', 'value': baf_dev.motion_sense_enable},
+                {'key': 'motion_sense_timeout', 'value': baf_dev.motion_sense_timeout},
+                {'key': 'return_to_auto', 'value': baf_dev.return_to_auto_enable},
+                {'key': 'return_to_auto_timeout', 'value': baf_dev.return_to_auto_timeout},
+                {'key': 'target_rpm', 'value': baf_dev.target_rpm},
+                {'key': 'occupancy_detected', 'value': baf_dev.fan_occupancy_detected},
+                {'key': 'temperature', 'value': baf_dev.temperature},
+                {'key': 'humidity', 'value': baf_dev.humidity},
+                {'key': 'device_name', 'value': baf_dev.name},
+                {'key': 'ip_address', 'value': baf_dev.ip_address},
+                {'key': 'led_indicators_enabled', 'value': baf_dev.led_indicators_enable},
+                {'key': 'beep_enabled', 'value': baf_dev.fan_beep_enable},
+                {'key': 'legacy_ir_remote_enabled', 'value': baf_dev.legacy_ir_remote_enable}
+
             ]
+            self._add_optional_property(states, 'model', baf_dev.model)
+            self._add_optional_property(states, 'firmware_version', baf_dev.firmware_version)
+            self._add_optional_property(states, 'mac_address', baf_dev.mac_address)
+            self._add_optional_property(states, 'dns_sd_uuid', baf_dev.dns_sd_uuid)
+            self._add_optional_property(states, 'api_version', baf_dev.api_version)
+            self._add_optional_property(states, 'has_light', baf_dev.has_light)
+            self._add_optional_property(states, 'has_uplight', baf_dev.has_uplight)
+            self._add_optional_property(states, 'wifi_ssid', baf_dev.wifi_ssid)
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(fan_dev, states)
             )
+
+
+    @staticmethod
+    def _add_optional_property(states: list, key: str, value: Optional[Any]) -> None:
+        """Adds a key-value pair to the states list if it is not None"""
+        if value is not None:
+            states.append({'key': key, 'value': value})
 
 
     def _update_device_states_on_server(self, dev: indigo.Device, states: list[dict]) -> None:
@@ -646,15 +684,23 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Maps BAF properties to native and custom Indigo device states."""
         self._update_device_available(light_dev, baf_dev.available)
         if baf_dev.available:
-            brightness = int(min(baf_dev.light_brightness_level * INDIGO_TO_BAF_BRIGHTNESS_RATIO,
-                                 INDIGO_BRIGHTNESS_MAX))
-            on_off_state = brightness > 0
+            on_off_state = baf_dev.light_brightness_percent > 0
             auto_mode = baf_dev.light_mode == OffOnAuto.AUTO
             states = [
                 {'key': 'onOffState', 'value': on_off_state},
-                {'key': 'brightnessLevel', 'value': brightness},
+                {'key': 'brightnessLevel', 'value': baf_dev.light_brightness_percent},
+                {'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature},
+                {'key': 'brightness_index', 'value': baf_dev.light_brightness_level},
                 {'key': 'auto_mode', 'value': auto_mode},
-                {'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature}
+                {'key': 'dim_to_warm', 'value': baf_dev.light_dim_to_warm_enable},
+                {'key': 'auto_motion_timeout', 'value': baf_dev.light_auto_motion_timeout},
+                {'key': 'return_to_auto', 'value': baf_dev.light_return_to_auto_enable},
+                {'key': 'return_to_auto_timeout', 'value': baf_dev.light_return_to_auto_timeout},
+                {'key': 'warmest_color_temperature',
+                 'value': baf_dev.light_warmest_color_temperature},
+                {'key': 'coolest_color_temperature',
+                 'value': baf_dev.light_coolest_color_temperature},
+                {'key': 'occupancy_detected', 'value': baf_dev.light_occupancy_detected}
             ]
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(light_dev, states)
@@ -848,9 +894,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             elif action.deviceAction == indigo.kDeviceAction.Toggle:
                 self._toggle_light_on_off_state(dev)
             elif action.deviceAction == indigo.kDeviceAction.SetBrightness:
-                brightness = int(min(action.actionValue / INDIGO_TO_BAF_BRIGHTNESS_RATIO,
-                                     BAF_BRIGHTNESS_MAX))
-                self._set_device_property(dev, "light_brightness_level", brightness)
+                self._set_device_property(dev, "light_brightness_percent", action.value)
             elif action.deviceAction == indigo.kDeviceAction.BrightenBy:
                 self._adjust_light_brightness(dev, action.actionValue)
             elif action.deviceAction == indigo.kDeviceAction.DimBy:
