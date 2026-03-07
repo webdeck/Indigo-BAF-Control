@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Devices>
     <!-- Parent Device: Manages connection and child lifecycle -->
-    <Device id="bafFan" type="speedcontrol" icon="fan">
+    <Device id="bafFan" type="speedcontrol">
         <Name>BAF/Haiku Fan</Name>
         <ConfigUI>
             <Title>Network Connection</Title>
@@ -23,38 +23,176 @@
             </Field>
         </ConfigUI>
         <States>
-            <!-- Reference to the automatically created light child -->
-            <State id="child_light_id">
-                <ValueType>Integer</ValueType>
-                <TriggerLabel>Child Light ID Changed</TriggerLabel>
-                <ControlPageLabel>Child Light ID</ControlPageLabel>
-            </State>
-            <!-- Fan Motor Special Modes -->
-            <State id="auto_mode" icon="auto_mode_motor">
+            <State id="auto_mode">
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Fan Auto Mode Changed</TriggerLabel>
                 <ControlPageLabel>Fan Auto Mode</ControlPageLabel>
             </State>
-            <State id="whoosh_mode" icon="whoosh_mode">
+            <State id="whoosh_mode">
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Whoosh Mode Changed</TriggerLabel>
                 <ControlPageLabel>Whoosh Mode</ControlPageLabel>
             </State>
-            <State id="reverse_direction" icon="reverse_mode">
+            <State id="reverse_direction">
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Reverse Direction Changed</TriggerLabel>
                 <ControlPageLabel>Reverse Direction</ControlPageLabel>
             </State>
-            <State id="eco_mode" icon="eco_mode">
+            <State id="eco_mode">
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Eco Mode Changed</TriggerLabel>
                 <ControlPageLabel>Eco Mode</ControlPageLabel>
             </State>
-        </States>
+            <State id="has_auto_comfort" readonly="YES">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Has Auto Comfort Changed</TriggerLabel>
+                <ControlPageLabel>Has Auto Comfort</ControlPageLabel>
+            </State>
+            <State id="has_occupancy" readonly="YES">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Has Occupancy Sensor Changed</TriggerLabel>
+                <ControlPageLabel>Has Occupancy Sensor</ControlPageLabel>
+            </State>
+            <State id="auto_comfort">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Auto Comfort Mode Changed</TriggerLabel>
+                <ControlPageLabel>Auto Comfort Mode</ControlPageLabel>
+            </State>
+            <State id="comfort_ideal_temperature">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Comfort Ideal Tmmperature Changed</TriggerLabel>
+                <ControlPageLabel>Comfort IDeal Temperature</ControlPageLabel>
+            </State>
+            <State id="comfort_heat_assist_enable">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Comfort Heat Assist Mode Changed</TriggerLabel>
+                <ControlPageLabel>Comfort Heat Assist Mode</ControlPageLabel>
+            </State>
+            <State id="comfort_heat_assist_speed">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Comfort Heat Assist Speed Changed</TriggerLabel>
+                <ControlPageLabel>Comfort Heat Assist Speed</ControlPageLabel>
+            </State>
+            <State id="comfort_heat_assist_reverse">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Comfort Heat Assist Reverse Direction Changed</TriggerLabel>
+                <ControlPageLabel>Comfort Heat Assist Reverse Direction</ControlPageLabel>
+            </State>
+            <State id="comfort_min_speed">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Comfort Minimum Speed Changed</TriggerLabel>
+                <ControlPageLabel>Comfort Minimum Speed</ControlPageLabel>
+            </State>
+            <State id="comfort_max_speed">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Comfort Maximum Speed Changed</TriggerLabel>
+                <ControlPageLabel>Comfort Maximum Speed</ControlPageLabel>
+            </State>
+            <State id="motion_sense">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Motion Sensor Enabled Changed</TriggerLabel>
+                <ControlPageLabel>Motion Sensor Enabled</ControlPageLabel>
+            </State>
+            <State id="motion_sense_timeout">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Motion Sensor Timeout Changed</TriggerLabel>
+                <ControlPageLabel>Motion Sensor Timeout</ControlPageLabel>
+            </State>
+            <State id="return_to_auto">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Return to Auto Mode Changed</TriggerLabel>
+                <ControlPageLabel>Return to Auto Mode</ControlPageLabel>
+            </State>
+            <State id="return_to_auto_timeout">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Return to Auto Mode Timeout Changed</TriggerLabel>
+                <ControlPageLabel>Return to Auto Mode Timeout</ControlPageLabel>
+            </State>
+            <State id="target_rpm" readonly="YES">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Target RPM Changed</TriggerLabel>
+                <ControlPageLabel>Target RPM</ControlPageLabel>
+            </State>
+            <State id="occupancy_detected" readonly="YES">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Occupancy Detected Changed</TriggerLabel>
+                <ControlPageLabel>Occupancy Detected</ControlPageLabel>
+            </State>
+            <State id="temperature" readonly="YES">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Temperature Changed</TriggerLabel>
+                <ControlPageLabel>Temperature</ControlPageLabel>
+            </State>
+            <State id="humidity" readonly="YES">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Humidity Changed</TriggerLabel>
+                <ControlPageLabel>Humidity</ControlPageLabel>
+            </State>
+            <State id="device_name" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Device Name Changed</TriggerLabel>
+                <ControlPageLabel>Device Name</ControlPageLabel>
+            </State>
+            <State id="ip_address" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>IP Address Changed</TriggerLabel>
+                <ControlPageLabel>IP Address</ControlPageLabel>
+            </State>
+            <State id="led_indicators_enabled">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>LED Indicators Enabled Changed</TriggerLabel>
+                <ControlPageLabel>LED Indicaotrs Enabled</ControlPageLabel>
+            </State>
+            <State id="beep_enabled">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Beep Enabled Changed</TriggerLabel>
+                <ControlPageLabel>Beep Enabled</ControlPageLabel>
+            </State>
+            <State id="legacy_ir_remote_enabled">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Legacy IR Remote Enabled Changed</TriggerLabel>
+                <ControlPageLabel>Legacy IR Remote Enabled</ControlPageLabel>
+            </State>
+            <State id="model" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Model Changed</TriggerLabel>
+                <ControlPageLabel>Model</ControlPageLabel>
+            </State>
+            <State id="firmware_version" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Firmware Version Changed</TriggerLabel>
+                <ControlPageLabel>Firmware Version</ControlPageLabel>
+            </State>
+            <State id="mac_address" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>MAC Address Changed</TriggerLabel>
+                <ControlPageLabel>MAC Address</ControlPageLabel>
+            </State>
+            <State id="dns_sd_uuid" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>DNS-SD UUID Changed</TriggerLabel>
+                <ControlPageLabel>DNS-SD UUID</ControlPageLabel>
+            </State>
+            <State id="api_version" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>API Version Changed</TriggerLabel>
+                <ControlPageLabel>API Version</ControlPageLabel>
+            </State>
+            <State id="has_light" readonly="YES">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Has Light Changed</TriggerLabel>
+                <ControlPageLabel>Has Light</ControlPageLabel>
+            </State>
+            <State id="wifi_ssid" readonly="YES">
+                <ValueType>String</ValueType>
+                <TriggerLabel>WiFi SSID Changed</TriggerLabel>
+                <ControlPageLabel>WiFi SSID</ControlPageLabel>
+            </State>
+       </States>
     </Device>
 
     <!-- Child Device: Managed by fan; hidden from 'New Device' menu -->
-    <Device id="bafLight" type="dimmer" subType="kDimmerDeviceSubType.ColorDimmer" icon="light" allowUserCreation="false">
+    <Device id="bafLight" type="dimmer" subType="kDimmerDeviceSubType.ColorDimmer" allowUserCreation="false">
         <Name>BAF/Haiku Fan Light</Name>
         <ConfigUI>
             <Field id="info_label" type="label">
@@ -62,11 +200,41 @@
             </Field>
         </ConfigUI>
         <States>
-            <State id="auto_mode" icon="auto_mode_light">
+            <State id="brightness_index">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Brightness Index Changed</TriggerLabel>
+                <ControlPageLabel>Brightness Index</ControlPageLabel>
+            </State>
+            <State id="auto_mode">
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Light Auto Mode Changed</TriggerLabel>
                 <ControlPageLabel>Light Auto Mode</ControlPageLabel>
             </State>
-        </States>
+            <State id="dim_to_warm">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Dim to Warm Changed</TriggerLabel>
+                <ControlPageLabel>Dim to Warm</ControlPageLabel>
+            </State>
+            <State id="auto_motion_timeout">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Auto Motion Timeout Changed</TriggerLabel>
+                <ControlPageLabel>Auto Motion Timeout</ControlPageLabel>
+            </State>
+            <State id="return_to_auto">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Return to Auto Mode Changed</TriggerLabel>
+                <ControlPageLabel>Return to Auto Mode</ControlPageLabel>
+            </State>
+            <State id="return_to_auto_timeout">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Return to Auto Mode Timeout Changed</TriggerLabel>
+                <ControlPageLabel>Return to Auto Mode Timeout</ControlPageLabel>
+            </State>
+            <State id="occupancy_detected" readonly="YES">
+                <ValueType>Boolean</ValueType>
+                <TriggerLabel>Occupancy Detected Changed</TriggerLabel>
+                <ControlPageLabel>Occupancy Detected</ControlPageLabel>
+            </State>
+          </States>
     </Device>
 </Devices>

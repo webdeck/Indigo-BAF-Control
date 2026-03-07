@@ -8,8 +8,9 @@ Device discovery module for BAF/Haiku fans.
 from __future__ import annotations
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Tuple
 from aiobafi6 import ServiceBrowser, Service
+from zeroconf import IPVersion
 from zeroconf.asyncio import AsyncZeroconf
 
 # Typing
@@ -30,15 +31,14 @@ class BAFDeviceDiscoveryManager:
 
     # Lifecycle management
 
-    async def start(self) -> None:
+    def start(self) -> None:
         """Starts device discovery."""
         if not self.azc:
             self.logger.debug("Starting BAF device discovery")
             # noinspection PyBroadException
             try:
-                self.azc = AsyncZeroconf()
-                # noinspection PyTypeChecker
-                self.browser = ServiceBrowser(self.azc.zeroconf, self)
+                self.azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
+                self.browser = ServiceBrowser(self.azc.zeroconf, self._callback)
             except Exception:  # pylint: disable=broad-exception-caught
                 self.logger.exception("Failed to create AsyncZeroconf")
 
@@ -117,32 +117,21 @@ class BAFDeviceDiscoveryManager:
             return dict(self._discovered_services.items())
 
 
-    # Internal ServiceBrowser callbacks
+    def _callback(self, services: Tuple[Service]) -> None:
+        self.logger.debug(f"Discovery callback called with: {services}")
+        with self._lock:
+            service_ids = []
+            for service in services:
+                service_id = self.get_service_id(service)
+                if service_id:
+                    service_ids.append(service_id)
+                    if not self._discovered_services.get(service_id):
+                        self.logger.info(
+                            f"Discovered BAF Device: {service.device_name} at {service_id}"
+                        )
+                        self._discovered_services[service_id] = service
 
-    def add_service(self, service: Service) -> None:
-        """Callback from aiobafi6.discovery when a verified fan is found."""
-        self.logger.info(
-            f"Discovered BAF Device: {service.device_name} {service.ip_addresses} {service.port}"
-        )
-        service_id = self.get_service_id(service)
-        if service_id:
-            self.logger.debug(f"Saving BAF Device with id {service_id}")
-            self.add_service_by_id(service, service_id)
-        else:
-            self.logger.warning(
-                f"Unable to get service ID for {service.device_name} {service.ip_addresses} {service.port}"  # pylint: disable=line-too-long
-            )
-
-    def remove_service(self, service: Service) -> None:
-        """Callback from aiobafi6.discovery when a fan is removed."""
-        self.logger.info(
-            f"Removed BAF Device: {service.device_name} {service.ip_addresses} {service.port}"
-        )
-        service_id = self.get_service_id(service)
-        if service_id:
-            self.logger.debug(f"Removing BAF Device with id {service_id}")
-            self.remove_service_by_id(service_id)
-        else:
-            self.logger.warning(
-                f"Unable to get service ID for {service.device_name} {service.ip_addresses} {service.port}"  # pylint: disable=line-too-long
-            )
+            for service_id in list(self._discovered_services.keys()):
+                if service_id not in service_ids:
+                    self.logger.info(f"Discovery removed BAF Device: {service_id}")
+                    del self._discovered_services[service_id]

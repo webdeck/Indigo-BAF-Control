@@ -60,9 +60,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
         self._lock = threading.Lock()
         self.fan_to_baf_map: dict[DeviceId, BAFDevice] = {}
-        self.baf_to_fan_map: dict[BAFDevice, DeviceId] = {}
+        self.baf_to_fan_map: dict[ServiceId, DeviceId] = {}
         self.baf_connections: dict[DeviceId, asyncio.Future] = {}
-        self.light_to_fan_map: dict[DeviceId, DeviceId] = {}  # {LIGHT_ID: FAN_ID}
         self.fan_availability: dict[DeviceId, bool] = {}
 
         self.discovery_manager = BAFDeviceDiscoveryManager(self.logger)
@@ -83,12 +82,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             daemon=True
         )
         self.event_loop_thread.start()
-
-        # Start discovery browser
-        asyncio.run_coroutine_threadsafe(
-            self.discovery_manager.start(),
-            self.event_loop
-        )
 
         self.logger.info("BAFControl Plugin started.")
 
@@ -132,10 +125,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         # Stop discovery manager
         try:
             if self.event_loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.discovery_manager.stop(),
-                    self.event_loop
-                ).result(timeout=2.0)
+                asyncio.wait_for(self.discovery_manager.stop(), timeout=2.0)
         except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
             self.logger.warning("Timed out waiting for discovery to stop.")
         finally:
@@ -151,7 +141,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 self.fan_to_baf_map.clear()
                 self.baf_to_fan_map.clear()
                 self.baf_connections.clear()
-                self.light_to_fan_map.clear()
                 self.fan_availability.clear()
 
             self.logger.info("Plugin shutdown complete.")
@@ -166,12 +155,18 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     def _run_event_loop(self) -> None:
         """Internal method to start and maintain the asyncio loop."""
+        self.logger.debug("Event loop thread starting")
         asyncio.set_event_loop(self.event_loop)
+
+        # Start discovery browser
+        self.discovery_manager.start()
+
         try:
+            self.logger.debug("Event loop thread running")
             self.event_loop.run_forever()
         finally:
             self.event_loop.close()
-            self.logger.debug("Async loop thread terminating")
+            self.logger.debug("Event loop thread terminating")
 
 
     def _stop_event_loop(self) -> None:
@@ -306,23 +301,20 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     def deviceStopComm(self, dev: indigo.Device) -> None:  # pylint: disable=invalid-name
         """Called by Indigo when a device is disabled."""
-        if dev.deviceTypeId == FAN_DEVICE_TYPE:
-            # First stop the connection supervisor and cleanup
-            self._stop_baf_connection(dev.id)
+        if dev.deviceTypeId != FAN_DEVICE_TYPE:
+            return
 
-            # Delete light sub-device as well
-            light_id = dev.pluginProps.get("child_light_id")
-            if light_id and light_id in indigo.devices:
-                self.logger.debug(f"Queueing light deletion for {dev.name}")
-                self._add_device_operation(
-                    lambda: self._delete_light(light_id, dev.id)
-                )
+        # First stop the connection supervisor and cleanup
+        self._stop_baf_connection(dev.id)
 
-        elif dev.deviceTypeId == LIGHT_DEVICE_TYPE:
-            # Remove from light to fan map
-            with self._lock:
-                if dev.id in self.light_to_fan_map:
-                    del self.light_to_fan_map[dev.id]
+        # Delete light sub-device as well
+        light_id = dev.pluginProps.get("child_light_id")
+        if light_id and light_id in indigo.devices:
+            self.logger.debug(f"Queueing light deletion for {dev.name}")
+            self._add_device_operation(
+                lambda: self._delete_light(light_id, dev.id)
+            )
+
 
     # noinspection PyMethodMayBeStatic
     def didDeviceCommPropertyChange(self, origDev: indigo.Device, newDev: indigo.Device) -> bool:  # pylint: disable=invalid-name
@@ -473,7 +465,9 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self.baf_connections.pop(fan_id, None)
             baf = self.fan_to_baf_map.pop(fan_id, None)
             if baf:
-                self.baf_to_fan_map.pop(baf, None)
+                service_id = self.discovery_manager.get_service_id(baf.service)
+                if service_id:
+                    self.baf_to_fan_map.pop(service_id, None)
 
         self._add_device_operation(lambda: self._update_error_state(fan_id, "offline"))
 
@@ -489,10 +483,11 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             f"Attempting connection to Fan ID {fan_id} at {service_id}"
         )
 
+        with self._lock:
+            self.baf_to_fan_map[service_id] = fan_id
         baf = BAFDevice(service)
         with self._lock:
             self.fan_to_baf_map[fan_id] = baf
-            self.baf_to_fan_map[baf] = fan_id
 
         baf.add_callback(self._baf_state_callback)
 
@@ -510,13 +505,12 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     def _baf_state_callback(self, baf_device: BAFDevice) -> None:
         """Handles callback from all BAF devices"""
-        self.logger.debug("Callback received for fan {baf_device.name}")
-        with self._lock:
-            fan_id: Optional[DeviceId] = self.baf_to_fan_map.get(baf_device)
+        self.logger.debug(f"Callback received for fan {baf_device.name}")
+        fan_id = self._get_fan_id_from_baf_device(baf_device)
         if fan_id:
             self._handle_baf_state_callback(baf_device, fan_id)
         else:
-            self.logger.debug("Unable to find fan_id for BAF device {baf_device.name}")
+            self.logger.debug(f"Unable to find fan_id for BAF device {baf_device.name}")
 
 
     def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:
@@ -532,7 +526,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             # Handle child light device - create/delete if necessary
             light_id: Optional[DeviceId] = fan_dev.pluginProps.get("child_light_id")
             # noinspection PyUnresolvedReferences
-            if baf_device.has_any_light:
+            if baf_device.has_light:
                 if light_id:
                     light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
                     if light_dev:
@@ -565,19 +559,26 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 deviceTypeId=LIGHT_DEVICE_TYPE,
                 folder=fan_dev.folderId
             )
+            new_light.configured = True
+            new_light.replaceOnServer()
 
             # Update light properties
             props = dict(new_light.pluginProps)
-            props["supportsAllLightsOnOff"] = True
-            props["supportsAllOff"] = True
-            props["SupportsColor"] = False
-            props["supportsRGB"] = False
-            props["supportsRGBandWhiteSimultaneously"] = False
-            props["supportsStatusRequest"] = False
-            props["supportsTwoWhiteLevels"] = False
-            props["supportsTwoWhiteLevelsSimultaneously"] = False
-            props["supportsWhite"] = False
-            props["supportsWhiteTemperature"] = True
+            supports_color_temp = (baf_device.light_warmest_color_temperature !=
+                                   baf_device.light_coolest_color_temperature)
+            props["SupportsAllLightsOnOff"] = True
+            props["SupportsAllOff"] = True
+            props["SupportsColor"] = supports_color_temp
+            props["SupportsRGB"] = False
+            props["SupportsRGBandWhiteSimultaneously"] = False
+            props["SupportsStatusRequest"] = False
+            props["SupportsTwoWhiteLevels"] = False
+            props["SupportsTwoWhiteLevelsSimultaneously"] = False
+            props["SupportsWhite"] = supports_color_temp
+            props["SupportsWhiteTemperature"] = supports_color_temp
+            props["WhiteTemperatureMin"] = baf_device.light_warmest_color_temperature
+            props["WhiteTemperatureMax"] = baf_device.light_coolest_color_temperature
+            props["parent_fan_id"] = fan_dev.id
             new_light.replacePluginPropsOnServer(props)
 
             # Update fan properties
@@ -585,8 +586,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             props["child_light_id"] = new_light.id
             fan_dev.replacePluginPropsOnServer(props)
 
-            with self._lock:
-                self.light_to_fan_map[new_light.id] = fan_id
             self.logger.info(f"Created child light device {new_light.id} for {fan_name}")
 
             self._update_light_states(new_light, baf_device)
@@ -599,8 +598,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             indigo.device.delete(light_id)
             self.logger.info(f"Removed child light device {light_id} for fan {fan_id}")
 
-        with self._lock:
-            self.light_to_fan_map.pop(light_id, None)
 
         fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
         if fan_dev and fan_dev.pluginProps.get("child_light_id"):
@@ -608,7 +605,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             props.pop("child_light_id", None)
             fan_dev.replacePluginPropsOnServer(props)
 
-    # noinspection PyUnresolvedReferences
     def _update_fan_states(self, fan_dev: indigo.Device, baf_dev: BAFDevice) -> None:
         """Maps BAF properties to native and custom Indigo device states."""
         self._update_device_available(fan_dev, baf_dev.available)
@@ -625,7 +621,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 {'key': 'whoosh_mode', 'value': baf_dev.whoosh_enable},
                 {'key': 'eco_mode', 'value': baf_dev.eco_enable},
                 {'key': 'reverse_direction', 'value': baf_dev.reverse_enable},
-                {'key': 'has_any_light', 'value': baf_dev.has_any_light},
                 {'key': 'has_auto_comfort', 'value': baf_dev.has_auto_comfort},
                 {'key': 'has_occupancy', 'value': baf_dev.has_occupancy},
                 {'key': 'auto_comfort', 'value': baf_dev.auto_comfort_enable},
@@ -657,7 +652,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self._add_optional_property(states, 'dns_sd_uuid', baf_dev.dns_sd_uuid)
             self._add_optional_property(states, 'api_version', baf_dev.api_version)
             self._add_optional_property(states, 'has_light', baf_dev.has_light)
-            self._add_optional_property(states, 'has_uplight', baf_dev.has_uplight)
             self._add_optional_property(states, 'wifi_ssid', baf_dev.wifi_ssid)
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(fan_dev, states)
@@ -679,7 +673,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self.logger.exception(f"State update failed for {dev.name}: {ex}")
 
 
-    # noinspection PyUnresolvedReferences
     def _update_light_states(self, light_dev: indigo.Device, baf_dev: BAFDevice) -> None:
         """Maps BAF properties to native and custom Indigo device states."""
         self._update_device_available(light_dev, baf_dev.available)
@@ -689,19 +682,16 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             states = [
                 {'key': 'onOffState', 'value': on_off_state},
                 {'key': 'brightnessLevel', 'value': baf_dev.light_brightness_percent},
-                {'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature},
                 {'key': 'brightness_index', 'value': baf_dev.light_brightness_level},
                 {'key': 'auto_mode', 'value': auto_mode},
                 {'key': 'dim_to_warm', 'value': baf_dev.light_dim_to_warm_enable},
                 {'key': 'auto_motion_timeout', 'value': baf_dev.light_auto_motion_timeout},
                 {'key': 'return_to_auto', 'value': baf_dev.light_return_to_auto_enable},
                 {'key': 'return_to_auto_timeout', 'value': baf_dev.light_return_to_auto_timeout},
-                {'key': 'warmest_color_temperature',
-                 'value': baf_dev.light_warmest_color_temperature},
-                {'key': 'coolest_color_temperature',
-                 'value': baf_dev.light_coolest_color_temperature},
                 {'key': 'occupancy_detected', 'value': baf_dev.light_occupancy_detected}
             ]
+            if light_dev.pluginProps.get("SupportsWhiteTemperature", False) is True:
+                states.append({'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature})
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(light_dev, states)
             )
@@ -733,13 +723,19 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     light.setErrorStateOnServer(state)
 
 
+    def _get_fan_id_from_baf_device(self, baf_dev: BAFDevice) -> Optional[DeviceId]:
+        """Helper to find the Indigo fan device for a BAF device."""
+        service_id = self.discovery_manager.get_service_id(baf_dev.service)
+        with self._lock:
+            return self.baf_to_fan_map.get(service_id)
+
+
     def _get_baf_instance(self, dev: indigo.Device) -> Optional[BAFDevice]:
         """Helper to find the active connection for either a fan or light device."""
         fan_id = dev.id
         if dev.deviceTypeId == LIGHT_DEVICE_TYPE:
-            with self._lock:
-                fan_id = self.light_to_fan_map.get(dev.id)
-        if fan_id is not None:
+            fan_id = dev.pluginProps.get("parent_fan_id")
+        if fan_id:
             with self._lock:
                 return self.fan_to_baf_map.get(fan_id)
         return None
@@ -802,7 +798,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             speed = int(min(action.actionValue / INDIGO_TO_BAF_SPEED_INDEX_RATIO, BAF_SPEED_MAX))
             self._set_device_property(dev, "speed", speed)
         elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedLevel:
-            self._set_device_property(dev, "speed_percent", action.actionValue)
+            speed = int(min(action.actionValue / 100.0 * BAF_SPEED_MAX, BAF_SPEED_MAX))
+            self._set_device_property(dev, "speed", speed)
         elif action.speedControlAction == indigo.kSpeedControlAction.IncreaseSpeedIndex:
             self._adjust_fan_speed_index(dev, 1)
         elif action.speedControlAction == indigo.kSpeedControlAction.DecreaseSpeedIndex:
@@ -894,7 +891,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             elif action.deviceAction == indigo.kDeviceAction.Toggle:
                 self._toggle_light_on_off_state(dev)
             elif action.deviceAction == indigo.kDeviceAction.SetBrightness:
-                self._set_device_property(dev, "light_brightness_percent", action.value)
+                self._set_device_property(dev, "light_brightness_percent", action.actionValue)
             elif action.deviceAction == indigo.kDeviceAction.BrightenBy:
                 self._adjust_light_brightness(dev, action.actionValue)
             elif action.deviceAction == indigo.kDeviceAction.DimBy:
