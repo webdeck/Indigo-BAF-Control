@@ -5,7 +5,7 @@
     <key>PluginVersion</key>
     <string>2026.1.0</string>
     <key>ServerApiVersion</key>
-    <string>3.4</string>
+    <string>3.7</string>
     <key>CFBundleDisplayName</key>
     <string>BAF/Haiku Fan i6 Control</string>
     <key>CFBundleIdentifier</key>

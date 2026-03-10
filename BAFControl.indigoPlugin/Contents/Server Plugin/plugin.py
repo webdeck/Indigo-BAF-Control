@@ -561,6 +561,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             )
             new_light.configured = True
             new_light.replaceOnServer()
+            indigo.device.groupWithDevice(new_light, fan_dev)
 
             # Update light properties
             props = dict(new_light.pluginProps)
@@ -593,17 +594,18 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
     def _delete_light(self, light_id: DeviceId, fan_id: DeviceId) -> None:
         """Helper method to delete a child light device (called on concurrent thread)."""
-        light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
-        if light_dev:
-            indigo.device.delete(light_id)
-            self.logger.info(f"Removed child light device {light_id} for fan {fan_id}")
-
-
         fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and fan_dev.pluginProps.get("child_light_id"):
+        if fan_dev and fan_dev.pluginProps.get("child_light_id") == light_id:
+            light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
+            if light_dev:
+                indigo.device.ungroupDevice(light_dev)
+                indigo.device.delete(light_id)
+                self.logger.info(f"Removed child light device {light_id} for fan {fan_id}")
+
             props = dict(fan_dev.pluginProps)
             props.pop("child_light_id", None)
             fan_dev.replacePluginPropsOnServer(props)
+
 
     def _update_fan_states(self, fan_dev: indigo.Device, baf_dev: BAFDevice) -> None:
         """Maps BAF properties to native and custom Indigo device states."""
@@ -871,22 +873,18 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         if dev.deviceTypeId == FAN_DEVICE_TYPE:
             if action.deviceAction == indigo.kDeviceAction.TurnOn:
                 self._set_device_property(dev, "fan_mode", OffOnAuto.ON)
-            elif action.deviceAction == indigo.kDeviceAction.TurnOff:
-                self._set_device_property(dev, "fan_mode", OffOnAuto.OFF)
-            elif action.deviceAction == indigo.kDeviceAction.AllOff:
+            elif action.deviceAction in (indigo.kDeviceAction.TurnOff,
+                                         indigo.kDeviceAction.AllOff):
                 self._set_device_property(dev, "fan_mode", OffOnAuto.OFF)
             elif action.deviceAction == indigo.kDeviceAction.Toggle:
                 self._toggle_fan_on_off_state(dev)
         elif dev.deviceTypeId == LIGHT_DEVICE_TYPE:
-            if action.deviceAction == indigo.kDeviceAction.TurnOn:
+            if action.deviceAction in (indigo.kDeviceAction.TurnOn,
+                                       indigo.kDeviceAction.AllLightsOn):
                 self._set_device_property(dev, "light_mode", OffOnAuto.ON)
-            elif action.deviceAction == indigo.kDeviceAction.AllLightsOn:
-                self._set_device_property(dev, "light_mode", OffOnAuto.ON)
-            elif action.deviceAction == indigo.kDeviceAction.TurnOff:
-                self._set_device_property(dev, "light_mode", OffOnAuto.OFF)
-            elif action.deviceAction == indigo.kDeviceAction.AllLightsOff:
-                self._set_device_property(dev, "light_mode", OffOnAuto.OFF)
-            elif action.deviceAction == indigo.kDeviceAction.AllOff:
+            elif action.deviceAction in (indigo.kDeviceAction.TurnOff,
+                                         indigo.kDeviceAction.AllLightsOff,
+                                         indigo.kDeviceAction.AllOff):
                 self._set_device_property(dev, "light_mode", OffOnAuto.OFF)
             elif action.deviceAction == indigo.kDeviceAction.Toggle:
                 self._toggle_light_on_off_state(dev)
@@ -897,7 +895,10 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             elif action.deviceAction == indigo.kDeviceAction.DimBy:
                 self._adjust_light_brightness(dev, -1.0 * action.actionValue)
             elif action.deviceAction == indigo.kDeviceAction.SetColorLevels:
-                self._set_device_property(dev, "light_color_temperature", action.actionValue)
+                color_dict: dict = action.actionValue
+                if 'whiteTemperature' in color_dict:
+                    self._set_device_property(dev, "light_color_temperature",
+                                              color_dict['whiteTemperature'])
 
     # noinspection PyUnusedLocal
     def actionEnableLightAuto(self, action: Any, dev: indigo.Device) -> None:  # pylint: disable=invalid-name,unused-argument
