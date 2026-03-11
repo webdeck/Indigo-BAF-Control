@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Actions>
-    <!-- FAN MOTOR ACTIONS (Parent) -->
+    <!-- FAN MOTOR ACTIONS -->
     
     <!-- Fan Auto Mode -->
     <Action id="enableFanAuto" deviceTypeId="bafFan">
@@ -39,17 +39,11 @@
     </Action>
 
 
-    <!-- FAN LIGHT ACTIONS (Managed Child) -->
+    <!-- FAN LIGHT ACTIONS -->
     
     <!-- Light Auto Mode -->
     <Action id="enableLightAuto" deviceTypeId="bafLight">
         <Name>Enable Light Auto Mode</Name>
         <CallbackMethod>actionEnableLightAuto</CallbackMethod>
-    </Action>
-
-    <!-- Light Color Temperature (Kelvin) -->
-    <Action id="controlColorTemperature" deviceTypeId="bafLight">
-        <Name>Set Color Temperature</Name>
-        <CallbackMethod>actionControlColorTemperature</CallbackMethod>
     </Action>
 </Actions>
