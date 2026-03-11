@@ -118,7 +118,6 @@ class BAFDeviceDiscoveryManager:
 
 
     def _callback(self, services: Tuple[Service]) -> None:
-        self.logger.debug(f"Discovery callback called with: {services}")
         with self._lock:
             service_ids = []
             for service in services:
