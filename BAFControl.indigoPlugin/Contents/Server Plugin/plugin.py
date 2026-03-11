@@ -124,10 +124,16 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
         # Stop discovery manager
         try:
-            if self.event_loop:
-                asyncio.wait_for(self.discovery_manager.stop(), timeout=2.0)
+            if self.event_loop and self.event_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    asyncio.wait_for(self.discovery_manager.stop(), timeout=2.0),
+                    self.event_loop
+                )
+                future.result(timeout=2.5)
         except (asyncio.TimeoutError, concurrent.futures.TimeoutError):
             self.logger.warning("Timed out waiting for discovery to stop.")
+        except Exception as ex:  # pylint: disable=broad-exception-caught
+            self.logger.exception(f"Error stopping discovery: {ex}")
         finally:
             # Stop all active fan connections and supervisors
             with self._lock:
@@ -922,8 +928,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         baf = self._get_baf_instance(dev)
         if baf:
             new_brightness = int(max(0.0, min(100.0, baf.light_brightness_percent + delta)))
-            self._set_device_property(dev, "light_brightness_level", new_brightness)
+            self._set_device_property(dev, "light_brightness_percent", new_brightness)
         else:
             self.logger.error(
-                f"Command adjust fan speed failed: '{dev.name}' is offline or not linked."
+                f"Command adjust light brightness failed: '{dev.name}' is offline or not linked."
             )
