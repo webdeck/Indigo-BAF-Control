@@ -230,11 +230,6 @@
                 <TriggerLabel>Return to Auto Mode Timeout Changed</TriggerLabel>
                 <ControlPageLabel>Return to Auto Mode Timeout</ControlPageLabel>
             </State>
-            <State id="occupancy_detected" readonly="YES">
-                <ValueType>Boolean</ValueType>
-                <TriggerLabel>Occupancy Detected Changed</TriggerLabel>
-                <ControlPageLabel>Occupancy Detected</ControlPageLabel>
-            </State>
           </States>
     </Device>
 </Devices>

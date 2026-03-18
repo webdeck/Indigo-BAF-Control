@@ -17,7 +17,6 @@ from queue import Queue, Empty
 import socket
 import threading
 from typing import Any, Callable, Optional
-# noinspection PyUnresolvedReferences
 import indigo  # pylint: disable=import-error
 from aiobafi6 import (Device as BAFDevice, Service as BAFService, OffOnAuto)
 from device_discovery import BAFDeviceDiscoveryManager, ServiceId
@@ -34,11 +33,6 @@ LIGHT_DEVICE_TYPE = "bafLight"
 INDIGO_SPEED_MAX_INDEX = 3.0
 BAF_SPEED_MAX = 7.0
 INDIGO_TO_BAF_SPEED_INDEX_RATIO = INDIGO_SPEED_MAX_INDEX / BAF_SPEED_MAX
-
-# Indigo light brightness is 0-100; BAF light brightness is 0-16
-INDIGO_BRIGHTNESS_MAX = 100.0
-BAF_BRIGHTNESS_MAX = 16.0
-INDIGO_TO_BAF_BRIGHTNESS_RATIO = INDIGO_BRIGHTNESS_MAX / BAF_BRIGHTNESS_MAX
 
 # Service ID for manual IP/Port entry
 SERVICE_ID_MANUAL = "manual"
@@ -531,7 +525,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
             # Handle child light device - create/delete if necessary
             light_id: Optional[DeviceId] = fan_dev.pluginProps.get("child_light_id")
-            # noinspection PyUnresolvedReferences
             if baf_device.has_light:
                 if light_id:
                     light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
@@ -617,8 +610,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Maps BAF properties to native and custom Indigo device states."""
         self._update_device_available(fan_dev, baf_dev.available)
         if baf_dev.available:
-            speed_index = int(min(baf_dev.speed * INDIGO_TO_BAF_SPEED_INDEX_RATIO,
-                                  INDIGO_SPEED_MAX_INDEX))
+            speed_index = int(round(min(baf_dev.speed * INDIGO_TO_BAF_SPEED_INDEX_RATIO,
+                                    INDIGO_SPEED_MAX_INDEX)))
             on_off_state = baf_dev.speed > 0
             auto_mode = baf_dev.fan_mode == OffOnAuto.AUTO
             states = [
@@ -673,7 +666,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             states.append({'key': key, 'value': value})
 
 
-    def _update_device_states_on_server(self, dev: indigo.Device, states: list[dict]) -> None:
+    def _update_device_states_on_server(self, dev: indigo.Device,
+                                        states: list[indigo.Dict]) -> None:
         """Updates the device states on the server (called on concurrent thread)."""
         try:
             dev.updateStatesOnServer(states)
@@ -695,8 +689,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 {'key': 'dim_to_warm', 'value': baf_dev.light_dim_to_warm_enable},
                 {'key': 'auto_motion_timeout', 'value': baf_dev.light_auto_motion_timeout},
                 {'key': 'return_to_auto', 'value': baf_dev.light_return_to_auto_enable},
-                {'key': 'return_to_auto_timeout', 'value': baf_dev.light_return_to_auto_timeout},
-                {'key': 'occupancy_detected', 'value': baf_dev.light_occupancy_detected}
+                {'key': 'return_to_auto_timeout', 'value': baf_dev.light_return_to_auto_timeout}
             ]
             if light_dev.pluginProps.get("SupportsWhiteTemperature", False) is True:
                 states.append({'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature})
@@ -803,10 +796,12 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         elif action.speedControlAction == indigo.kSpeedControlAction.Toggle:
             self._toggle_fan_on_off_state(dev)
         elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedIndex:
-            speed = int(min(action.actionValue / INDIGO_TO_BAF_SPEED_INDEX_RATIO, BAF_SPEED_MAX))
+            speed = int(round(min(action.actionValue / INDIGO_TO_BAF_SPEED_INDEX_RATIO,
+                                  BAF_SPEED_MAX)))
             self._set_device_property(dev, "speed", speed)
         elif action.speedControlAction == indigo.kSpeedControlAction.SetSpeedLevel:
-            speed = int(min(action.actionValue / 100.0 * BAF_SPEED_MAX, BAF_SPEED_MAX))
+            speed = int(round(min(action.actionValue / 100.0 * BAF_SPEED_MAX,
+                                  BAF_SPEED_MAX)))
             self._set_device_property(dev, "speed", speed)
         elif action.speedControlAction == indigo.kSpeedControlAction.IncreaseSpeedIndex:
             self._adjust_fan_speed_index(dev, 1)

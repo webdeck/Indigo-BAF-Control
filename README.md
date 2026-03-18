@@ -34,7 +34,8 @@ TODO: Adding an occupancy sensor device for fans that support that feature.
 
 ## Support
 
-*Indigo support forum coming soon.*
+Please use the [BAFControl Indigo sub-forum](https://forums.indigodomo.com/viewforum.php?f=422)
+for support.
 
 ## Acknowledgements
 
