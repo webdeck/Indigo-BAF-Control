@@ -54,7 +54,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
         self._lock = threading.Lock()
         self.fan_to_baf_map: dict[DeviceId, BAFDevice] = {}
-        self.baf_to_fan_map: dict[ServiceId, DeviceId] = {}
+        self.baf_to_fan_map: dict[ServiceId, list[DeviceId]] = {}
         self.baf_connections: dict[DeviceId, asyncio.Future] = {}
         self.fan_availability: dict[DeviceId, bool] = {}
 
@@ -466,8 +466,12 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             baf = self.fan_to_baf_map.pop(fan_id, None)
             if baf:
                 service_id = self.discovery_manager.get_service_id(baf.service)
-                if service_id:
-                    self.baf_to_fan_map.pop(service_id, None)
+                if service_id and service_id in self.baf_to_fan_map:
+                    id_list = self.baf_to_fan_map[service_id]
+                    if fan_id in id_list:
+                        id_list.remove(fan_id)
+                    if not id_list:
+                        del self.baf_to_fan_map[service_id]
 
         self._add_device_operation(lambda: self._update_error_state(fan_id, "offline"))
 
@@ -484,7 +488,11 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         )
 
         with self._lock:
-            self.baf_to_fan_map[service_id] = fan_id
+            if service_id not in self.baf_to_fan_map:
+                self.baf_to_fan_map[service_id] = []
+            if fan_id not in self.baf_to_fan_map[service_id]:
+                self.baf_to_fan_map[service_id].append(fan_id)
+
         baf = BAFDevice(service)
         with self._lock:
             self.fan_to_baf_map[fan_id] = baf
@@ -506,9 +514,10 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     def _baf_state_callback(self, baf_device: BAFDevice) -> None:
         """Handles callback from all BAF devices"""
         self.logger.debug(f"Callback received for fan {baf_device.name}")
-        fan_id = self._get_fan_id_from_baf_device(baf_device)
-        if fan_id:
-            self._handle_baf_state_callback(baf_device, fan_id)
+        fan_ids = self._get_fan_ids_from_baf_device(baf_device)
+        if fan_ids:
+            for fan_id in fan_ids:
+                self._handle_baf_state_callback(baf_device, fan_id)
         else:
             self.logger.debug(f"Unable to find fan_id for BAF device {baf_device.name}")
 
@@ -682,17 +691,26 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             on_off_state = baf_dev.light_brightness_percent > 0
             auto_mode = baf_dev.light_mode == OffOnAuto.AUTO
             states = [
-                {'key': 'onOffState', 'value': on_off_state},
-                {'key': 'brightnessLevel', 'value': baf_dev.light_brightness_percent},
-                {'key': 'brightness_index', 'value': baf_dev.light_brightness_level},
-                {'key': 'auto_mode', 'value': auto_mode},
-                {'key': 'dim_to_warm', 'value': baf_dev.light_dim_to_warm_enable},
-                {'key': 'auto_motion_timeout', 'value': baf_dev.light_auto_motion_timeout},
-                {'key': 'return_to_auto', 'value': baf_dev.light_return_to_auto_enable},
-                {'key': 'return_to_auto_timeout', 'value': baf_dev.light_return_to_auto_timeout}
+                indigo.Dict({'key': 'onOffState',
+                             'value': on_off_state}),
+                indigo.Dict({'key': 'brightnessLevel',
+                             'value': baf_dev.light_brightness_percent}),
+                indigo.Dict({'key': 'brightness_index',
+                             'value': baf_dev.light_brightness_level}),
+                indigo.Dict({'key': 'auto_mode',
+                             'value': auto_mode}),
+                indigo.Dict({'key': 'dim_to_warm',
+                             'value': baf_dev.light_dim_to_warm_enable}),
+                indigo.Dict({'key': 'auto_motion_timeout',
+                             'value': baf_dev.light_auto_motion_timeout}),
+                indigo.Dict({'key': 'return_to_auto',
+                             'value': baf_dev.light_return_to_auto_enable}),
+                indigo.Dict({'key': 'return_to_auto_timeout',
+                             'value': baf_dev.light_return_to_auto_timeout})
             ]
             if light_dev.pluginProps.get("SupportsWhiteTemperature", False) is True:
-                states.append({'key': 'whiteTemperature', 'value': baf_dev.light_color_temperature})
+                states.append(indigo.Dict({'key': 'whiteTemperature',
+                                           'value': baf_dev.light_color_temperature}))
             self._add_device_operation(
                 lambda: self._update_device_states_on_server(light_dev, states)
             )
@@ -724,11 +742,11 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     light.setErrorStateOnServer(state)
 
 
-    def _get_fan_id_from_baf_device(self, baf_dev: BAFDevice) -> Optional[DeviceId]:
-        """Helper to find the Indigo fan device for a BAF device."""
+    def _get_fan_ids_from_baf_device(self, baf_dev: BAFDevice) -> list[DeviceId]:
+        """Helper to find the Indigo fan devices for a BAF device."""
         service_id = self.discovery_manager.get_service_id(baf_dev.service)
         with self._lock:
-            return self.baf_to_fan_map.get(service_id)
+            return list(self.baf_to_fan_map.get(service_id, []))
 
 
     def _get_baf_instance(self, dev: indigo.Device) -> Optional[BAFDevice]:
