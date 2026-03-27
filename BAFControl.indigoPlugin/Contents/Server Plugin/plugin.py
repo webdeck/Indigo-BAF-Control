@@ -291,22 +291,30 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             if dev.id not in self.service_id_to_fan_map[service_id]:
                 self.service_id_to_fan_map[service_id].append(dev.id)
 
+            baf = self.service_id_to_baf_map.get(service_id)
             is_running = service_id in self.service_id_to_connection_map
-            if not is_running:
-                self.logger.info(
-                    f"Starting communication with BAF device at {service_id}"
-                )
-                try:
+
+        if is_running:
+            # Connection already exists, trigger immediate update for the new device
+            if baf:
+                self.logger.debug(f"Triggering initial state update for device {dev.id}")
+                self._handle_baf_state_callback(baf, dev.id)
+        else:
+            self.logger.info(
+                f"Starting communication with BAF device at {service_id}"
+            )
+            try:
+                with self._lock:
                     self.service_id_to_connection_map[service_id] = \
                         asyncio.run_coroutine_threadsafe(
                             self._start_baf_connection(service_id, service),
                             self.event_loop
                         )
-                except Exception as ex:  # pylint: disable=broad-exception-caught
-                    self.logger.exception(
-                        f"Failed to start communication with BAF device at {service_id}: {ex}"
-                    )
-                    dev.setErrorStateOnServer("connection failed")
+            except Exception as ex:  # pylint: disable=broad-exception-caught
+                self.logger.exception(
+                    f"Failed to start communication with BAF device at {service_id}: {ex}"
+                )
+                dev.setErrorStateOnServer("connection failed")
 
 
     def deviceStopComm(self, dev: indigo.Device) -> None:  # pylint: disable=invalid-name
