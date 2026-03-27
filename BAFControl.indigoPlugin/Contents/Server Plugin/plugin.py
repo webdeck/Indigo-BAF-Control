@@ -323,14 +323,18 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             return
 
         service_id = dev.address
+        stop_service_connection = False
         with self._lock:
             if service_id and service_id in self.service_id_to_fan_map:
                 if dev.id in self.service_id_to_fan_map[service_id]:
                     self.service_id_to_fan_map[service_id].remove(dev.id)
                 if not self.service_id_to_fan_map[service_id]:
                     # Last Indigo device for this BAF hardware, stop the connection
-                    self._stop_service_connection(service_id)
+                    stop_service_connection = True
                     del self.service_id_to_fan_map[service_id]
+
+        if stop_service_connection:
+            self._stop_service_connection(service_id)
 
         self._update_error_state(dev.id, "offline")
 
@@ -444,7 +448,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             while True:
                 with self._lock:
                     if service_id not in self.service_id_to_connection_map:
-                        self.logger.debug(f"Connection supervisor for {service_id} cancelled.")
+                        self.logger.debug(f"Connection to BAF device at {service_id} cancelled.")
                         break
                 # noinspection PyBroadException
                 try:
