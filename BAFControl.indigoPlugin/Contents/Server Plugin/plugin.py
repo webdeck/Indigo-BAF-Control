@@ -53,9 +53,9 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         self._set_log_level(pluginPrefs)
 
         self._lock = threading.Lock()
-        self.service_to_baf_map: dict[ServiceId, BAFDevice] = {}
-        self.baf_to_fan_map: dict[ServiceId, list[DeviceId]] = {}
-        self.baf_connections: dict[ServiceId, asyncio.Future] = {}
+        self.service_id_to_baf_map: dict[ServiceId, BAFDevice] = {}
+        self.service_id_to_fan_map: dict[ServiceId, list[DeviceId]] = {}
+        self.service_id_to_connection_map: dict[ServiceId, asyncio.Future] = {}
         self.fan_availability: dict[DeviceId, bool] = {}
 
         self.discovery_manager = BAFDeviceDiscoveryManager(self.logger)
@@ -131,16 +131,16 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         finally:
             # Stop all active hardware connections
             with self._lock:
-                service_ids = list(self.baf_connections.keys())
+                service_ids = list(self.service_id_to_connection_map.keys())
             for service_id in service_ids:
                 self._stop_service_connection(service_id)
 
             self._stop_event_loop()
 
             with self._lock:
-                self.service_to_baf_map.clear()
-                self.baf_to_fan_map.clear()
-                self.baf_connections.clear()
+                self.service_id_to_baf_map.clear()
+                self.service_id_to_fan_map.clear()
+                self.service_id_to_connection_map.clear()
                 self.fan_availability.clear()
 
             self.logger.info("Plugin shutdown complete.")
@@ -286,27 +286,27 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
         # Register fan with the service
         with self._lock:
-            if service_id not in self.baf_to_fan_map:
-                self.baf_to_fan_map[service_id] = []
-            if dev.id not in self.baf_to_fan_map[service_id]:
-                self.baf_to_fan_map[service_id].append(dev.id)
+            if service_id not in self.service_id_to_fan_map:
+                self.service_id_to_fan_map[service_id] = []
+            if dev.id not in self.service_id_to_fan_map[service_id]:
+                self.service_id_to_fan_map[service_id].append(dev.id)
 
-        # Start connection supervisor if not already running
-        with self._lock:
-            is_running = service_id in self.baf_connections
-        if not is_running:
-            self.logger.info(
-                f"Starting communication with BAF device at {service_id}"
-            )
-            try:
-                with self._lock:
-                    self.baf_connections[service_id] = asyncio.run_coroutine_threadsafe(
-                        self._start_baf_connection(service_id, service),
-                        self.event_loop
+            is_running = service_id in self.service_id_to_connection_map
+            if not is_running:
+                self.logger.info(
+                    f"Starting communication with BAF device at {service_id}"
+                )
+                try:
+                    self.service_id_to_connection_map[service_id] = \
+                        asyncio.run_coroutine_threadsafe(
+                            self._start_baf_connection(service_id, service),
+                            self.event_loop
+                        )
+                except Exception as ex:  # pylint: disable=broad-exception-caught
+                    self.logger.exception(
+                        f"Failed to start communication with BAF device at {service_id}: {ex}"
                     )
-            except Exception as ex:  # pylint: disable=broad-exception-caught
-                self.logger.exception(f"Failed to start communication with {service_id}: {ex}")
-                dev.setErrorStateOnServer("connection failed")
+                    dev.setErrorStateOnServer("connection failed")
 
 
     def deviceStopComm(self, dev: indigo.Device) -> None:  # pylint: disable=invalid-name
@@ -316,13 +316,13 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
         service_id = dev.address
         with self._lock:
-            if service_id and service_id in self.baf_to_fan_map:
-                if dev.id in self.baf_to_fan_map[service_id]:
-                    self.baf_to_fan_map[service_id].remove(dev.id)
-                if not self.baf_to_fan_map[service_id]:
+            if service_id and service_id in self.service_id_to_fan_map:
+                if dev.id in self.service_id_to_fan_map[service_id]:
+                    self.service_id_to_fan_map[service_id].remove(dev.id)
+                if not self.service_id_to_fan_map[service_id]:
                     # Last Indigo device for this BAF hardware, stop the connection
                     self._stop_service_connection(service_id)
-                    del self.baf_to_fan_map[service_id]
+                    del self.service_id_to_fan_map[service_id]
 
         self._update_error_state(dev.id, "offline")
 
@@ -427,7 +427,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         Manages hardware connection. This method runs forever as a background Task.
         """
         self.logger.debug(
-            f"Connection supervisor started for BAF Service {service_id}"
+            f"Connection established to BAF device at {service_id}"
         )
         backoff = 5.0
         max_backoff = 300.0
@@ -435,7 +435,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         try:
             while True:
                 with self._lock:
-                    if service_id not in self.baf_connections:
+                    if service_id not in self.service_id_to_connection_map:
                         self.logger.debug(f"Connection supervisor for {service_id} cancelled.")
                         break
                 # noinspection PyBroadException
@@ -447,43 +447,35 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     raise
                 except Exception as ex:  # pylint: disable=broad-exception-caught
                     self.logger.exception(
-                        f"Reconnecting to BAF Service {service_id} in {backoff} seconds: {ex}"
+                        f"Reconnecting to BAF device at {service_id} in {backoff} seconds: {ex}"
                     )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, max_backoff)
 
         except asyncio.CancelledError:
             self.logger.debug(
-                f"Connection supervisor for BAF Service {service_id} was cancelled"
+                f"Connection to BAF device at {service_id} was cancelled"
             )
         finally:
             self.logger.debug(
-                f"Connection supervisor for BAF Service {service_id} stopped"
+                f"Connection to BAF device at {service_id} closed"
             )
 
 
     def _stop_service_connection(self, service_id: ServiceId) -> None:
         """Centralized cleanup for stopping a hardware connection."""
         with self._lock:
-            task = self.baf_connections.pop(service_id, None)
+            task = self.service_id_to_connection_map.pop(service_id, None)
+            self.service_id_to_baf_map.pop(service_id, None)
+
         if task:
-            self.logger.debug(f"Canceling connection for BAF Service {service_id}")
+            self.logger.debug(f"Canceling connection to BAF device at {service_id}")
             try:
                 task.cancel()
             except Exception as ex:  # pylint: disable=broad-exception-caught
-                self.logger.exception(f"Failed to cancel task for {service_id}: {ex}")
-
-        with self._lock:
-            self.service_to_baf_map.pop(service_id, None)
-
-
-    def _stop_baf_connection(self, fan_id: DeviceId) -> None:
-        """Centralized cleanup for stopping a specific hardware connection for a fan."""
-        # This is now handled in deviceStopComm by removing the fan from the subscribers list.
-        # This method is kept for backward compatibility if needed by other parts of the code.
-        fan = indigo.devices.get(fan_id)
-        if fan:
-            self.deviceStopComm(fan)
+                self.logger.exception(
+                    f"Failed to cancel connection to BAF device at {service_id}: {ex}"
+                )
 
 
     async def _manage_baf_connection(self, service_id: ServiceId,
@@ -493,25 +485,25 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         Keeps running for as long as the fan stays connected.
         """
         self.logger.debug(
-            f"Attempting connection to BAF Service {service_id}"
+            f"Attempting connection to BAF device at {service_id}"
         )
 
         baf = BAFDevice(service)
         with self._lock:
-            self.service_to_baf_map[service_id] = baf
+            self.service_id_to_baf_map[service_id] = baf
 
         baf.add_callback(self._baf_state_callback)
 
         self.logger.info(
-            f"Connection established to BAF Service {service_id}, monitoring connection..."
+            f"Connection established to BAF device at {service_id}; monitoring connection..."
         )
 
         try:
             await baf.async_run()
         finally:
             baf.remove_callback(self._baf_state_callback)
-            self.logger.warning(f"Connection closed for BAF Service {service_id}")
-            self._update_error_state_for_service(service_id, "offline")
+            self.logger.warning(f"Connection closed to BAF device at {service_id}")
+            self._update_error_state_for_service_id(service_id, "offline")
 
 
     def _baf_state_callback(self, baf_device: BAFDevice) -> None:
@@ -746,10 +738,11 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     light.setErrorStateOnServer(state)
 
 
-    def _update_error_state_for_service(self, service_id: ServiceId, state: Optional[str]) -> None:
-        """Updates the error state for all Indigo devices associated with a BAF service"""
+    def _update_error_state_for_service_id(self, service_id: ServiceId,
+                                           state: Optional[str]) -> None:
+        """Updates the error state for all Indigo devices associated with a BAF device"""
         with self._lock:
-            fan_ids = list(self.baf_to_fan_map.get(service_id, []))
+            fan_ids = list(self.service_id_to_fan_map.get(service_id, []))
         for fan_id in fan_ids:
             self._update_error_state(fan_id, state)
 
@@ -758,7 +751,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Helper to find the Indigo fan devices for a BAF device."""
         service_id = self.discovery_manager.get_service_id(baf_dev.service)
         with self._lock:
-            return list(self.baf_to_fan_map.get(service_id, []))
+            return list(self.service_id_to_fan_map.get(service_id, []))
 
 
     def _get_baf_instance(self, dev: indigo.Device) -> Optional[BAFDevice]:
@@ -766,7 +759,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         service_id = dev.address
         if service_id:
             with self._lock:
-                return self.service_to_baf_map.get(service_id)
+                return self.service_id_to_baf_map.get(service_id)
         return None
 
 
