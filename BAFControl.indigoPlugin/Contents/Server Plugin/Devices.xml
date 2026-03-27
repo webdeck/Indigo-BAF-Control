@@ -23,6 +23,11 @@
             </Field>
         </ConfigUI>
         <States>
+            <State id="baf_speed">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>BAF Speed Changed</TriggerLabel>
+                <ControlPageLabel>BAF Speed (0-7)</ControlPageLabel>
+            </State>
             <State id="auto_mode">
                 <ValueType>Boolean</ValueType>
                 <TriggerLabel>Fan Auto Mode Changed</TriggerLabel>

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>PluginVersion</key>
-    <string>2026.1.0</string>
+    <string>2026.1.1</string>
     <key>ServerApiVersion</key>
     <string>3.7</string>
     <key>CFBundleDisplayName</key>
-    <string>BAF/Haiku Fan i6 Control</string>
+    <string>BAF/Haiku</string>
     <key>CFBundleIdentifier</key>
     <string>com.webdeck.indigoplugin.bafcontrol</string>
     <key>CFBundleVersion</key>

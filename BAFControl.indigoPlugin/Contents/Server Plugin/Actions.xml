@@ -1,39 +1,57 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Actions>
     <!-- FAN MOTOR ACTIONS -->
-    
-    <!-- Fan Auto Mode -->
-    <Action id="enableFanAuto" deviceTypeId="bafFan">
+
+    <Action id="setBAFFanSpeed" deviceFilter="self.bafFan" uiPath="DeviceActions">
+        <Name>Set BAF Fan Speed</Name>
+        <CallbackMethod>actionSetBAFFanSpeed</CallbackMethod>
+        <ConfigUI>
+            <Field type="menu" id="speed" defaultValue="0">
+                <Label>Speed:</Label>
+                <List>
+                    <Option value="0">0 (Off)</Option>
+                    <Option value="1">1</Option>
+                    <Option value="2">2 (Low)</Option>
+                    <Option value="3">3</Option>
+                    <Option value="4">4</Option>
+                    <Option value="5">5 (Medium)</Option>
+                    <Option value="6">6</Option>
+                    <Option value="7">7 (High)</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="sep1" deviceFilter="self.bafFan" uiPath="DeviceActions"/>
+
+    <Action id="enableFanAuto" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Enable Fan Auto Mode</Name>
         <CallbackMethod>actionEnableFanAuto</CallbackMethod>
     </Action>
 
-    <!-- Whoosh Mode -->
-    <Action id="enableWhoosh" deviceTypeId="bafFan">
+    <Action id="enableWhoosh" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Enable Whoosh Mode</Name>
         <CallbackMethod>actionEnableWhoosh</CallbackMethod>
     </Action>
-    <Action id="disableWhoosh" deviceTypeId="bafFan">
+    <Action id="disableWhoosh" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Disable Whoosh Mode</Name>
         <CallbackMethod>actionDisableWhoosh</CallbackMethod>
     </Action>
 
-    <!-- Eco Mode -->
-    <Action id="enableEco" deviceTypeId="bafFan">
+    <Action id="enableEco" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Enable Eco Mode</Name>
         <CallbackMethod>actionEnableEco</CallbackMethod>
     </Action>
-    <Action id="disableEco" deviceTypeId="bafFan">
+    <Action id="disableEco" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Disable Eco Mode</Name>
         <CallbackMethod>actionDisableEco</CallbackMethod>
     </Action>
 
-    <!-- Reverse Direction -->
-    <Action id="enableReverse" deviceTypeId="bafFan">
+    <Action id="enableReverse" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Enable Reverse Direction</Name>
         <CallbackMethod>actionEnableReverse</CallbackMethod>
     </Action>
-    <Action id="disableReverse" deviceTypeId="bafFan">
+    <Action id="disableReverse" deviceFilter="self.bafFan" uiPath="DeviceActions">
         <Name>Disable Reverse Direction</Name>
         <CallbackMethod>actionDisableReverse</CallbackMethod>
     </Action>
@@ -41,8 +59,7 @@
 
     <!-- FAN LIGHT ACTIONS -->
     
-    <!-- Light Auto Mode -->
-    <Action id="enableLightAuto" deviceTypeId="bafLight">
+    <Action id="enableLightAuto" deviceFilter="self.bafLight" uiPath="DeviceActions">
         <Name>Enable Light Auto Mode</Name>
         <CallbackMethod>actionEnableLightAuto</CallbackMethod>
     </Action>
