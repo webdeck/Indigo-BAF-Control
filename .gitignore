@@ -126,5 +126,8 @@ dmypy.json
 /aficons
 AGENTS.md
 
+# Test install
+BAFControl.indigoPlugin/Contents/Packages
+
 # Release zip
 /BAFControl.indigoPlugin.zip

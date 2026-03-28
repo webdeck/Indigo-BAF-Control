@@ -11,9 +11,9 @@ If a fan has a light, a light device will be created along with the fan device.
 
 ## Download and Installation
 
-*Indigo Plugin Store coming soon.*  Until then, you can manually download the
-beta release from **Releases** on the right, unzip it, and double-click
-`Indigo-BAF-Control.indigoplugin` to install in Indigo.
+Download from the [Indigo Plugin Store](https://www.indigodomo.com/pluginstore/321/)
+and double-click the zip file, and the double click `BAFControl.indigoPlugin`
+to install on your Indigo server.
 
 ## Configuration
 
