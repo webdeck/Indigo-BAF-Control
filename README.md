@@ -20,7 +20,7 @@ to install on your Indigo server.
 The plugin does not require any configuration other than optioanlly adjusting
 the logging level.
 
-To create a new Indigo device, choose the `BAF / Haiku i6 Fan Control` device
+To create a new Indigo device, choose the `BAF / Haiku` device
 type, and choose the `BAF / Haiku Fan` model.  Then either select a discovered
 fan from the menu, or manually enter the IP address or hostname.
 
