@@ -221,7 +221,7 @@
           </States>
     </Device>
 
-    <Device id="bafOccupancy" type="sensor" subType="kSensorDeviceSubType.MotionSensor" allowUserCreation="false">
+    <Device id="bafOccupancy" type="sensor" subType="kSensorDeviceSubType.Motion" allowUserCreation="false">
         <Name>BAF/Haiku Fan Occupancy Sensor</Name>
         <ConfigUI>
             <Field id="info_label" type="label">
