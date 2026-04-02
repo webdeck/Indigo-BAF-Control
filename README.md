@@ -9,6 +9,10 @@ DNS-SD (Bonjour) discovery, or manually by IP address or hostname.
 
 If a fan has a light, a light device will be created along with the fan device.
 
+If a fan has an occupancy sensor, an occupancy sensor device will also be created.
+
+Similarly, temperature and/or humidity sensors will be created if supported by the fan.
+
 ## Download and Installation
 
 Download from the [Indigo Plugin Store](https://www.indigodomo.com/pluginstore/321/)
@@ -17,8 +21,8 @@ to install on your Indigo server.
 
 ## Configuration
 
-The plugin does not require any configuration other than optioanlly adjusting
-the logging level.
+The plugin configuration allows you to set your preferred temperature scale
+(Celsius or Fahrenheit) as well as the logging level.
 
 To create a new Indigo device, choose the `BAF / Haiku` device
 type, and choose the `BAF / Haiku Fan` model.  Then either select a discovered
@@ -27,10 +31,8 @@ fan from the menu, or manually enter the IP address or hostname.
 ## Device Control
 
 Fans support all speed control device features, and lights support all dimmer
-device features.  A variety of states can be used as triggers for fans and
-lights.
-
-TODO: Adding an occupancy sensor device for fans that support that feature.
+device features.  A variety of custom states can be used as triggers for fans,
+lights, and sensors.
 
 ## Support
 

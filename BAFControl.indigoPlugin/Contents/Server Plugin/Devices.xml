@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Devices>
-    <!-- Parent Device: Manages connection and child lifecycle -->
     <Device id="bafFan" type="speedcontrol">
         <Name>BAF/Haiku Fan</Name>
         <ConfigUI>
@@ -118,21 +117,6 @@
                 <TriggerLabel>Target RPM Changed</TriggerLabel>
                 <ControlPageLabel>Target RPM</ControlPageLabel>
             </State>
-            <State id="occupancy_detected" readonly="YES">
-                <ValueType>Boolean</ValueType>
-                <TriggerLabel>Occupancy Detected Changed</TriggerLabel>
-                <ControlPageLabel>Occupancy Detected</ControlPageLabel>
-            </State>
-            <State id="temperature" readonly="YES">
-                <ValueType>Number</ValueType>
-                <TriggerLabel>Temperature Changed</TriggerLabel>
-                <ControlPageLabel>Temperature</ControlPageLabel>
-            </State>
-            <State id="humidity" readonly="YES">
-                <ValueType>Number</ValueType>
-                <TriggerLabel>Humidity Changed</TriggerLabel>
-                <ControlPageLabel>Humidity</ControlPageLabel>
-            </State>
             <State id="device_name" readonly="YES">
                 <ValueType>String</ValueType>
                 <TriggerLabel>Device Name Changed</TriggerLabel>
@@ -196,7 +180,6 @@
        </States>
     </Device>
 
-    <!-- Child Device: Managed by fan; hidden from 'New Device' menu -->
     <Device id="bafLight" type="dimmer" subType="kDimmerDeviceSubType.ColorDimmer" allowUserCreation="false">
         <Name>BAF/Haiku Fan Light</Name>
         <ConfigUI>
@@ -236,5 +219,32 @@
                 <ControlPageLabel>Return to Auto Mode Timeout</ControlPageLabel>
             </State>
           </States>
+    </Device>
+
+    <Device id="bafOccupancy" type="sensor" subType="kSensorDeviceSubType.OccupancySensor" allowUserCreation="false">
+        <Name>BAF/Haiku Fan Occupancy Sensor</Name>
+        <ConfigUI>
+            <Field id="info_label" type="label">
+                <Label>This device is managed automatically by the parent Fan device.</Label>
+            </Field>
+        </ConfigUI>
+    </Device>
+
+    <Device id="bafTemperature" type="sensor" subType="kSensorDeviceSubType.Temperature" allowUserCreation="false">
+        <Name>BAF/Haiku Fan Temperature Sensor</Name>
+        <ConfigUI>
+            <Field id="info_label" type="label">
+                <Label>This device is managed automatically by the parent Fan device.</Label>
+            </Field>
+        </ConfigUI>
+    </Device>
+
+    <Device id="bafHumidity" type="sensor" subType="kSensorDeviceSubType.Humidity" allowUserCreation="false">
+        <Name>BAF/Haiku Fan Humidity Sensor</Name>
+        <ConfigUI>
+            <Field id="info_label" type="label">
+                <Label>This device is managed automatically by the parent Fan device.</Label>
+            </Field>
+        </ConfigUI>
     </Device>
 </Devices>

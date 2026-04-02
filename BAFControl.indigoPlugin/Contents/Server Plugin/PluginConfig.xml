@@ -1,5 +1,12 @@
 <?xml version="1.0"?>
 <PluginConfig>
+    <Field id="temperatureScale" type="menu" defaultValue="C">
+        <Label>Temperature Scale:</Label>
+        <List>
+            <Option value="C">Celsius (°C)</Option>
+            <Option value="F">Fahrenheit (°F)</Option>
+        </List>
+    </Field>
     <Field id="logLevel" type="menu" defaultValue="20">
         <Label>Logging Level:</Label>
         <List>

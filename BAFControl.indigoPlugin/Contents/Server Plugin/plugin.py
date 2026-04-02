@@ -1,12 +1,13 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
+# pylint: disable=too-many-lines
 
 """
 Indigo Plugin for Big Ass Fans (BAF) i6/Haiku devices.
 
 This plugin bridges Indigo's synchronous Python environment with the
 asynchronous aiobafi6 library using a background asyncio event loop.
-Parent Fan device manages child light device if applicable.
+Parent Fan device manages child light and/or sensor devices if applicable.
 """
 
 from __future__ import annotations
@@ -28,6 +29,16 @@ DeviceMenuItem = tuple[ServiceId, str]
 # Device Types
 FAN_DEVICE_TYPE = "bafFan"
 LIGHT_DEVICE_TYPE = "bafLight"
+OCCUPANCY_SENSOR_DEVICE_TYPE = "bafOccupancy"
+TEMPERATURE_SENSOR_DEVICE_TYPE = "bafTemperature"
+HUMIDITY_SENSOR_DEVICE_TYPE = "bafHumidity"
+
+# Property Keys
+PROP_PARENT_FAN_ID = "parent_fan_id"
+PROP_CHILD_LIGHT_ID = "child_light_id"
+PROP_CHILD_OCCUPANCY_SENSOR_ID = "child_occupancy_sensor_id"
+PROP_CHILD_TEMPERATURE_SENSOR_ID = "child_temperature_sensor_id"
+PROP_CHILD_HUMIDITY_SENSOR_ID = "child_humidity_sensor_id"
 
 # Indigo fan speed index is 0-3; BAF fan speed is 0-7
 INDIGO_SPEED_MAX_INDEX = 3.0
@@ -51,6 +62,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Initialize plugin and data structures."""
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self._set_log_level(pluginPrefs)
+        self.temperature_scale = pluginPrefs.get("temperatureScale", "C")
 
         self._lock = threading.Lock()
         self.service_id_to_baf_map: dict[ServiceId, BAFDevice] = {}
@@ -84,6 +96,13 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         """Called by Indigo when the plugin preferences dialog is closed"""
         if not userCancelled:
             self._set_log_level(valuesDict)
+            new_scale = valuesDict.get("temperatureScale", "C")
+            if self.temperature_scale != new_scale:
+                self.temperature_scale = new_scale
+                with self._lock:
+                    baf_devices = list(self.service_id_to_baf_map.values())
+                for baf in baf_devices:
+                    self._baf_state_callback(baf)
 
 
     def runConcurrentThread(self) -> None:  # pylint: disable=invalid-name
@@ -339,7 +358,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         self._update_error_state(dev.id, "offline")
 
         # Delete light sub-device as well
-        light_id = dev.pluginProps.get("child_light_id")
+        light_id = dev.pluginProps.get(PROP_CHILD_LIGHT_ID)
         if light_id and light_id in indigo.devices:
             self.logger.debug(f"Queueing light deletion for {dev.name}")
             self._add_device_operation(
@@ -529,7 +548,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self.logger.debug(f"Unable to find fan_id for BAF device {baf_device.name}")
 
 
-    def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:
+    def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:  # pylint: disable=too-many-statements,too-many-branches
         """Handles callback for a specific BAF device with state updates"""
         try:
             fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
@@ -540,7 +559,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self._update_fan_states(fan_dev, baf_device)
 
             # Handle child light device - create/delete if necessary
-            light_id: Optional[DeviceId] = fan_dev.pluginProps.get("child_light_id")
+            light_id: Optional[DeviceId] = fan_dev.pluginProps.get(PROP_CHILD_LIGHT_ID)
             if baf_device.has_light:
                 if light_id:
                     light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
@@ -558,6 +577,69 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     lambda: self._delete_light(light_id, fan_id)
                 )
 
+            # Handle child occupancy sensor device - create/delete if necessary
+            occupancy_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
+                PROP_CHILD_OCCUPANCY_SENSOR_ID
+            )
+            if baf_device.has_occupancy:
+                if occupancy_sensor_id:
+                    sensor_dev: Optional[indigo.Device] = indigo.devices.get(occupancy_sensor_id)
+                    if sensor_dev:
+                        self._update_occupancy_sensor_states(sensor_dev, baf_device)
+                else:
+                    self.logger.debug(f"Queueing occupancy sensor creation for fan {fan_id}")
+                    self._add_device_operation(
+                        lambda: self._create_occupancy_sensor(fan_id, fan_dev.name,
+                                                              fan_dev.address, baf_device)
+                    )
+            elif occupancy_sensor_id:
+                self.logger.debug(f"Queueing occupancy sensor deletion for fan {fan_id}")
+                self._add_device_operation(
+                    lambda: self._delete_occupancy_sensor(occupancy_sensor_id, fan_id)
+                )
+
+            # Handle child temperature sensor device - create/delete if necessary
+            temperature_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
+                PROP_CHILD_TEMPERATURE_SENSOR_ID
+            )
+            if baf_device.temperature is not None:
+                if temperature_sensor_id:
+                    sensor_dev: Optional[indigo.Device] = indigo.devices.get(temperature_sensor_id)
+                    if sensor_dev:
+                        self._update_temperature_sensor_states(sensor_dev, baf_device)
+                else:
+                    self.logger.debug(f"Queueing temperature sensor creation for fan {fan_id}")
+                    self._add_device_operation(
+                        lambda: self._create_temperature_sensor(fan_id, fan_dev.name,
+                                                                fan_dev.address, baf_device)
+                    )
+            elif temperature_sensor_id:
+                self.logger.debug(f"Queueing temperature sensor deletion for fan {fan_id}")
+                self._add_device_operation(
+                    lambda: self._delete_temperature_sensor(temperature_sensor_id, fan_id)
+                )
+
+            # Handle child humidity sensor device - create/delete if necessary
+            humidity_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
+                PROP_CHILD_HUMIDITY_SENSOR_ID
+            )
+            if baf_device.humidity is not None:
+                if humidity_sensor_id:
+                    sensor_dev: Optional[indigo.Device] = indigo.devices.get(humidity_sensor_id)
+                    if sensor_dev:
+                        self._update_humidity_sensor_states(sensor_dev, baf_device)
+                else:
+                    self.logger.debug(f"Queueing humidity sensor creation for fan {fan_id}")
+                    self._add_device_operation(
+                        lambda: self._create_humidity_sensor(fan_id, fan_dev.name,
+                                                             fan_dev.address, baf_device)
+                    )
+            elif humidity_sensor_id:
+                self.logger.debug(f"Queueing humidity sensor deletion for fan {fan_id}")
+                self._add_device_operation(
+                    lambda: self._delete_humidity_sensor(humidity_sensor_id, fan_id)
+                )
+
         except Exception as ex:  # pylint: disable=broad-exception-caught
             self.logger.exception(f"State callback error for fan {fan_id}: {ex}")
 
@@ -566,7 +648,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                       service_id: ServiceId, baf_device: BAFDevice) -> None:
         """Helper method to create a child light device (called on concurrent thread)."""
         fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and not fan_dev.pluginProps.get("child_light_id"):
+        if fan_dev and not fan_dev.pluginProps.get(PROP_CHILD_LIGHT_ID):
             new_light: indigo.Device = indigo.device.create(
                 protocol=indigo.kProtocol.Plugin,
                 address=service_id,
@@ -594,12 +676,12 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             props["SupportsWhiteTemperature"] = supports_color_temp
             props["WhiteTemperatureMin"] = baf_device.light_warmest_color_temperature
             props["WhiteTemperatureMax"] = baf_device.light_coolest_color_temperature
-            props["parent_fan_id"] = fan_dev.id
+            props[PROP_PARENT_FAN_ID] = fan_dev.id
             new_light.replacePluginPropsOnServer(props)
 
             # Update fan properties
             props = dict(fan_dev.pluginProps)
-            props["child_light_id"] = new_light.id
+            props[PROP_CHILD_LIGHT_ID] = new_light.id
             fan_dev.replacePluginPropsOnServer(props)
 
             self.logger.info(f"Created child light device {new_light.id} for {fan_name}")
@@ -610,7 +692,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     def _delete_light(self, light_id: DeviceId, fan_id: DeviceId) -> None:
         """Helper method to delete a child light device (called on concurrent thread)."""
         fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and fan_dev.pluginProps.get("child_light_id") == light_id:
+        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_LIGHT_ID) == light_id:
             light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
             if light_dev:
                 indigo.device.ungroupDevice(light_dev)
@@ -618,7 +700,172 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 self.logger.info(f"Removed child light device {light_id} for fan {fan_id}")
 
             props = dict(fan_dev.pluginProps)
-            props.pop("child_light_id", None)
+            props.pop(PROP_CHILD_LIGHT_ID, None)
+            fan_dev.replacePluginPropsOnServer(props)
+
+
+    def _create_occupancy_sensor(self, fan_id: DeviceId, fan_name: str,
+                                 service_id: ServiceId, baf_device: BAFDevice) -> None:
+        """Helper method to create a child occupancy sensor device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and not fan_dev.pluginProps.get(PROP_CHILD_OCCUPANCY_SENSOR_ID):
+            new_sensor: indigo.Device = indigo.device.create(
+                protocol=indigo.kProtocol.Plugin,
+                address=service_id,
+                name=f"{fan_name} Occupancy Sensor",
+                deviceTypeId=OCCUPANCY_SENSOR_DEVICE_TYPE,
+                folder=fan_dev.folderId
+            )
+            new_sensor.configured = True
+            new_sensor.replaceOnServer()
+            indigo.device.groupWithDevice(new_sensor, fan_dev)
+
+            # Update sensor properties
+            props = dict(new_sensor.pluginProps)
+            props["AllowOnStateChange"] = False
+            props["AllowSensorValueChange"] = False
+            props["SupportsOnState"] = True
+            props["SupportsSensorValue"] = False
+            props["SupportsStatusRequest"] = False
+            props[PROP_PARENT_FAN_ID] = fan_dev.id
+            new_sensor.replacePluginPropsOnServer(props)
+
+            # Update fan properties
+            props = dict(fan_dev.pluginProps)
+            props[PROP_CHILD_OCCUPANCY_SENSOR_ID] = new_sensor.id
+            fan_dev.replacePluginPropsOnServer(props)
+
+            self.logger.info(
+                f"Created child occupancy sensor device {new_sensor.id} for {fan_name}"
+            )
+
+            self._update_occupancy_sensor_states(new_sensor, baf_device)
+
+
+    def _delete_occupancy_sensor(self, sensor_id: DeviceId, fan_id: DeviceId) -> None:
+        """Helper method to delete a child occupancy sensor device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_OCCUPANCY_SENSOR_ID) == sensor_id:
+            sensor_dev: Optional[indigo.Device] = indigo.devices.get(sensor_id)
+            if sensor_dev:
+                indigo.device.ungroupDevice(sensor_dev)
+                indigo.device.delete(sensor_dev)
+                self.logger.info(
+                    f"Removed child occupancy sensor device {sensor_dev} for fan {fan_id}"
+                )
+
+            props = dict(fan_dev.pluginProps)
+            props.pop(PROP_CHILD_OCCUPANCY_SENSOR_ID, None)
+            fan_dev.replacePluginPropsOnServer(props)
+
+
+    def _create_temperature_sensor(self, fan_id: DeviceId, fan_name: str,
+                                   service_id: ServiceId, baf_device: BAFDevice) -> None:
+        """Helper method to create child temperature sensor device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and not fan_dev.pluginProps.get(PROP_CHILD_TEMPERATURE_SENSOR_ID):
+            new_sensor: indigo.Device = indigo.device.create(
+                protocol=indigo.kProtocol.Plugin,
+                address=service_id,
+                name=f"{fan_name} Temperature Sensor",
+                deviceTypeId=TEMPERATURE_SENSOR_DEVICE_TYPE,
+                folder=fan_dev.folderId
+            )
+            new_sensor.configured = True
+            new_sensor.replaceOnServer()
+            indigo.device.groupWithDevice(new_sensor, fan_dev)
+
+            # Update sensor properties
+            props = dict(new_sensor.pluginProps)
+            props["AllowOnStateChange"] = False
+            props["AllowSensorValueChange"] = False
+            props["SupportsOnState"] = False
+            props["SupportsSensorValue"] = True
+            props["SupportsStatusRequest"] = False
+            props[PROP_PARENT_FAN_ID] = fan_dev.id
+            new_sensor.replacePluginPropsOnServer(props)
+
+            # Update fan properties
+            props = dict(fan_dev.pluginProps)
+            props[PROP_CHILD_TEMPERATURE_SENSOR_ID] = new_sensor.id
+            fan_dev.replacePluginPropsOnServer(props)
+
+            self.logger.info(
+                f"Created child temperature sensor device {new_sensor.id} for {fan_name}"
+            )
+
+            self._update_temperature_sensor_states(new_sensor, baf_device)
+
+
+    def _delete_temperature_sensor(self, sensor_id: DeviceId, fan_id: DeviceId) -> None:
+        """Helper method to delete child temperature sensor device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_TEMPERATURE_SENSOR_ID) == sensor_id:
+            sensor_dev: Optional[indigo.Device] = indigo.devices.get(sensor_id)
+            if sensor_dev:
+                indigo.device.ungroupDevice(sensor_dev)
+                indigo.device.delete(sensor_dev)
+                self.logger.info(
+                    f"Removed child temperature sensor device {sensor_dev} for fan {fan_id}"
+                )
+
+            props = dict(fan_dev.pluginProps)
+            props.pop(PROP_CHILD_TEMPERATURE_SENSOR_ID, None)
+            fan_dev.replacePluginPropsOnServer(props)
+
+
+    def _create_humidity_sensor(self, fan_id: DeviceId, fan_name: str,
+                                  service_id: ServiceId, baf_device: BAFDevice) -> None:
+        """Helper method to create child humidity sensor device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and not fan_dev.pluginProps.get(PROP_CHILD_HUMIDITY_SENSOR_ID):
+            new_sensor: indigo.Device = indigo.device.create(
+                protocol=indigo.kProtocol.Plugin,
+                address=service_id,
+                name=f"{fan_name} Humidity Sensor",
+                deviceTypeId=HUMIDITY_SENSOR_DEVICE_TYPE,
+                folder=fan_dev.folderId
+            )
+            new_sensor.configured = True
+            new_sensor.replaceOnServer()
+            indigo.device.groupWithDevice(new_sensor, fan_dev)
+
+            # Update sensor properties
+            props = dict(new_sensor.pluginProps)
+            props["AllowOnStateChange"] = False
+            props["AllowSensorValueChange"] = False
+            props["SupportsOnState"] = False
+            props["SupportsSensorValue"] = True
+            props["SupportsStatusRequest"] = False
+            props[PROP_PARENT_FAN_ID] = fan_dev.id
+            new_sensor.replacePluginPropsOnServer(props)
+
+            # Update fan properties
+            props = dict(fan_dev.pluginProps)
+            props[PROP_CHILD_HUMIDITY_SENSOR_ID] = new_sensor.id
+            fan_dev.replacePluginPropsOnServer(props)
+
+            self.logger.info(
+                f"Created child humidity sensor device {new_sensor.id} for {fan_name}"
+            )
+
+            self._update_humidity_sensor_states(new_sensor, baf_device)
+
+
+    def _delete_humidity_sensor(self, sensor_id: DeviceId, fan_id: DeviceId) -> None:
+        """Helper method to delete child humidity sensor device (called on concurrent thread)."""
+        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
+        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_HUMIDITY_SENSOR_ID) == sensor_id:
+            sensor_dev: Optional[indigo.Device] = indigo.devices.get(sensor_id)
+            if sensor_dev:
+                indigo.device.ungroupDevice(sensor_dev)
+                indigo.device.delete(sensor_dev)
+                self.logger.info(
+                    f"Removed child humidity sensor device {sensor_dev} for fan {fan_id}"
+                )
+
+            props = dict(fan_dev.pluginProps)
+            props.pop(PROP_CHILD_HUMIDITY_SENSOR_ID, None)
             fan_dev.replacePluginPropsOnServer(props)
 
 
@@ -630,6 +877,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                                     INDIGO_SPEED_MAX_INDEX)))
             on_off_state = baf_dev.speed > 0
             auto_mode = baf_dev.fan_mode == OffOnAuto.AUTO
+            comfort_ideal_temperature = self._scale_temperature(baf_dev.comfort_ideal_temperature)
             states = [
                 {'key': 'speedIndex', 'value': speed_index},
                 {'key': 'speedLevel', 'value': baf_dev.speed_percent},
@@ -642,7 +890,10 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 {'key': 'has_auto_comfort', 'value': baf_dev.has_auto_comfort},
                 {'key': 'has_occupancy', 'value': baf_dev.has_occupancy},
                 {'key': 'auto_comfort', 'value': baf_dev.auto_comfort_enable},
-                {'key': 'comfort_ideal_temperature', 'value': baf_dev.comfort_ideal_temperature},
+                {'key': 'comfort_ideal_temperature',
+                 'value': comfort_ideal_temperature,
+                 'uiValue': f"{comfort_ideal_temperature:.1f} °{self.temperature_scale}",
+                 'decimalPlaces': 1},
                 {'key': 'comfort_heat_assist_enable', 'value': baf_dev.comfort_heat_assist_enable},
                 {'key': 'comfort_heat_assist_speed', 'value': baf_dev.comfort_heat_assist_speed},
                 {'key': 'comfort_heat_assist_reverse',
@@ -654,9 +905,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                 {'key': 'return_to_auto', 'value': baf_dev.return_to_auto_enable},
                 {'key': 'return_to_auto_timeout', 'value': baf_dev.return_to_auto_timeout},
                 {'key': 'target_rpm', 'value': baf_dev.target_rpm},
-                {'key': 'occupancy_detected', 'value': baf_dev.fan_occupancy_detected},
-                {'key': 'temperature', 'value': baf_dev.temperature},
-                {'key': 'humidity', 'value': baf_dev.humidity},
                 {'key': 'device_name', 'value': baf_dev.name},
                 {'key': 'ip_address', 'value': baf_dev.ip_address},
                 {'key': 'led_indicators_enabled', 'value': baf_dev.led_indicators_enable},
@@ -724,6 +972,83 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             )
 
 
+    def _update_occupancy_sensor_states(self, sensor_dev: indigo.Device,
+                                        baf_dev: BAFDevice) -> None:
+        """Maps BAF properties to native and custom Indigo device states."""
+        self._update_device_available(sensor_dev, baf_dev.available)
+        if baf_dev.available:
+            on_off_state = baf_dev.fan_occupancy_detected or baf_dev.light_occupancy_detected
+            self._add_device_operation(
+                lambda: self._update_sensor_states_on_server(sensor_dev, on_off_state)
+            )
+
+
+    def _update_sensor_states_on_server(self, sensor_dev: indigo.Device,
+                                        on_off_state: bool) -> None:
+        """Updates the sensor device states on the server (called on concurrent thread)."""
+        states = [
+            indigo.Dict({'key': 'onOffState', 'value': on_off_state})
+        ]
+        self._update_device_states_on_server(sensor_dev, states)
+
+        if on_off_state:
+            sensor_dev.updateStateImageOnServer(indigo.kStateImageSel.MotionSensorTripped)
+        else:
+            sensor_dev.updateStateImageOnServer(indigo.kStateImageSel.MotionSensor)
+
+
+    def _update_temperature_sensor_states(self, sensor_dev: indigo.Device,
+                                          baf_dev: BAFDevice) -> None:
+        """Maps BAF properties to native and custom Indigo device states."""
+        self._update_device_available(sensor_dev, baf_dev.available)
+        if baf_dev.available:
+            temperature = self._scale_temperature(baf_dev.temperature)
+            states = []
+            if temperature is not None:
+                states.append(indigo.Dict(
+                    {'key': 'sensorValue',
+                     'value': temperature,
+                     'uiValue': f"{temperature:.1f} °{self.temperature_scale}",
+                     'decimalPlaces': 1}
+                ))
+            else:
+                states.append(indigo.Dict({'key': 'sensorValue', 'value': None}))
+
+            self._add_device_operation(
+                lambda: self._update_device_states_on_server(sensor_dev, states)
+            )
+
+
+    def _scale_temperature(self, temperature: Optional[float]) -> Optional[float]:
+        """Converts temperature to appropriate scale"""
+        result = temperature
+        if temperature is not None and self.temperature_scale == "F":
+            result = temperature * 9.0 / 5.0 + 32.0
+        return result
+
+
+    def _update_humidity_sensor_states(self, sensor_dev: indigo.Device,
+                                          baf_dev: BAFDevice) -> None:
+        """Maps BAF properties to native and custom Indigo device states."""
+        self._update_device_available(sensor_dev, baf_dev.available)
+        if baf_dev.available:
+            humidity = baf_dev.humidity
+            states = []
+            if humidity is not None:
+                states.append(indigo.Dict(
+                    {'key': 'sensorValue',
+                     'value': humidity,
+                     'uiValue': f"{humidity:.0f}%",
+                     'decimalPlaces': 0}
+                ))
+            else:
+                states.append(indigo.Dict({'key': 'sensorValue', 'value': None}))
+
+            self._add_device_operation(
+                lambda: self._update_device_states_on_server(sensor_dev, states)
+            )
+
+
     def _update_device_available(self, dev: indigo.Device, available: bool) -> None:
         """Updates device availability state on the server (uses concurrent thread.)"""
         with self._lock:
@@ -743,7 +1068,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         fan = indigo.devices.get(fan_id)
         if fan:
             fan.setErrorStateOnServer(state)
-            light_id = fan.pluginProps.get("child_light_id")
+            light_id = fan.pluginProps.get(PROP_CHILD_LIGHT_ID)
             if light_id:
                 light = indigo.devices.get(light_id)
                 if light:
