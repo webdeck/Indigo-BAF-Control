@@ -2,6 +2,6 @@
 
 PLUGIN="BAFControl.indigoPlugin"
 
-rm -f "$PLUGIN.zip"
+rm -fr "$PLUGIN.zip" "$PLUGIN/Contents/Packages"
 xattr -r -c "$PLUGIN"
 python3 /usr/local/indigo/indigo-clean-and-zip-plugin "$PLUGIN"
