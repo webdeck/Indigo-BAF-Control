@@ -357,14 +357,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
         self._update_error_state(dev.id, "offline")
 
-        # Delete light sub-device as well
-        light_id = dev.pluginProps.get(PROP_CHILD_LIGHT_ID)
-        if light_id and light_id in indigo.devices:
-            self.logger.debug(f"Queueing light deletion for {dev.name}")
-            self._add_device_operation(
-                lambda: self._delete_light(light_id, dev.id)
-            )
-
 
     # noinspection PyMethodMayBeStatic
     def didDeviceCommPropertyChange(self, origDev: indigo.Device, newDev: indigo.Device) -> bool:  # pylint: disable=invalid-name
@@ -558,7 +550,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
             self._update_fan_states(fan_dev, baf_device)
 
-            # Handle child light device - create/delete if necessary
+            # Handle child light device - create if necessary
             light_id: Optional[DeviceId] = fan_dev.pluginProps.get(PROP_CHILD_LIGHT_ID)
             if baf_device.has_light:
                 if light_id:
@@ -571,13 +563,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                         lambda: self._create_light(fan_id, fan_dev.name,
                                                    fan_dev.address, baf_device)
                     )
-            elif light_id:
-                self.logger.debug(f"Queueing light deletion for fan {fan_id}")
-                self._add_device_operation(
-                    lambda: self._delete_light(light_id, fan_id)
-                )
 
-            # Handle child occupancy sensor device - create/delete if necessary
+            # Handle child occupancy sensor device - create if necessary
             occupancy_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
                 PROP_CHILD_OCCUPANCY_SENSOR_ID
             )
@@ -592,13 +579,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                         lambda: self._create_occupancy_sensor(fan_id, fan_dev.name,
                                                               fan_dev.address, baf_device)
                     )
-            elif occupancy_sensor_id:
-                self.logger.debug(f"Queueing occupancy sensor deletion for fan {fan_id}")
-                self._add_device_operation(
-                    lambda: self._delete_occupancy_sensor(occupancy_sensor_id, fan_id)
-                )
 
-            # Handle child temperature sensor device - create/delete if necessary
+            # Handle child temperature sensor device - create if necessary
             temperature_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
                 PROP_CHILD_TEMPERATURE_SENSOR_ID
             )
@@ -613,13 +595,8 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                         lambda: self._create_temperature_sensor(fan_id, fan_dev.name,
                                                                 fan_dev.address, baf_device)
                     )
-            elif temperature_sensor_id:
-                self.logger.debug(f"Queueing temperature sensor deletion for fan {fan_id}")
-                self._add_device_operation(
-                    lambda: self._delete_temperature_sensor(temperature_sensor_id, fan_id)
-                )
 
-            # Handle child humidity sensor device - create/delete if necessary
+            # Handle child humidity sensor device - create if necessary
             humidity_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
                 PROP_CHILD_HUMIDITY_SENSOR_ID
             )
@@ -634,11 +611,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                         lambda: self._create_humidity_sensor(fan_id, fan_dev.name,
                                                              fan_dev.address, baf_device)
                     )
-            elif humidity_sensor_id:
-                self.logger.debug(f"Queueing humidity sensor deletion for fan {fan_id}")
-                self._add_device_operation(
-                    lambda: self._delete_humidity_sensor(humidity_sensor_id, fan_id)
-                )
 
         except Exception as ex:  # pylint: disable=broad-exception-caught
             self.logger.exception(f"State callback error for fan {fan_id}: {ex}")
@@ -689,21 +661,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self._update_light_states(new_light, baf_device)
 
 
-    def _delete_light(self, light_id: DeviceId, fan_id: DeviceId) -> None:
-        """Helper method to delete a child light device (called on concurrent thread)."""
-        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_LIGHT_ID) == light_id:
-            light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
-            if light_dev:
-                indigo.device.ungroupDevice(light_dev)
-                indigo.device.delete(light_id)
-                self.logger.info(f"Removed child light device {light_id} for fan {fan_id}")
-
-            props = dict(fan_dev.pluginProps)
-            props.pop(PROP_CHILD_LIGHT_ID, None)
-            fan_dev.replacePluginPropsOnServer(props)
-
-
     def _create_occupancy_sensor(self, fan_id: DeviceId, fan_name: str,
                                  service_id: ServiceId, baf_device: BAFDevice) -> None:
         """Helper method to create a child occupancy sensor device (called on concurrent thread)."""
@@ -740,23 +697,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             )
 
             self._update_occupancy_sensor_states(new_sensor, baf_device)
-
-
-    def _delete_occupancy_sensor(self, sensor_id: DeviceId, fan_id: DeviceId) -> None:
-        """Helper method to delete a child occupancy sensor device (called on concurrent thread)."""
-        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_OCCUPANCY_SENSOR_ID) == sensor_id:
-            sensor_dev: Optional[indigo.Device] = indigo.devices.get(sensor_id)
-            if sensor_dev:
-                indigo.device.ungroupDevice(sensor_dev)
-                indigo.device.delete(sensor_dev)
-                self.logger.info(
-                    f"Removed child occupancy sensor device {sensor_dev} for fan {fan_id}"
-                )
-
-            props = dict(fan_dev.pluginProps)
-            props.pop(PROP_CHILD_OCCUPANCY_SENSOR_ID, None)
-            fan_dev.replacePluginPropsOnServer(props)
 
 
     def _create_temperature_sensor(self, fan_id: DeviceId, fan_name: str,
@@ -797,23 +737,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             self._update_temperature_sensor_states(new_sensor, baf_device)
 
 
-    def _delete_temperature_sensor(self, sensor_id: DeviceId, fan_id: DeviceId) -> None:
-        """Helper method to delete child temperature sensor device (called on concurrent thread)."""
-        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_TEMPERATURE_SENSOR_ID) == sensor_id:
-            sensor_dev: Optional[indigo.Device] = indigo.devices.get(sensor_id)
-            if sensor_dev:
-                indigo.device.ungroupDevice(sensor_dev)
-                indigo.device.delete(sensor_dev)
-                self.logger.info(
-                    f"Removed child temperature sensor device {sensor_dev} for fan {fan_id}"
-                )
-
-            props = dict(fan_dev.pluginProps)
-            props.pop(PROP_CHILD_TEMPERATURE_SENSOR_ID, None)
-            fan_dev.replacePluginPropsOnServer(props)
-
-
     def _create_humidity_sensor(self, fan_id: DeviceId, fan_name: str,
                                   service_id: ServiceId, baf_device: BAFDevice) -> None:
         """Helper method to create child humidity sensor device (called on concurrent thread)."""
@@ -850,23 +773,6 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             )
 
             self._update_humidity_sensor_states(new_sensor, baf_device)
-
-
-    def _delete_humidity_sensor(self, sensor_id: DeviceId, fan_id: DeviceId) -> None:
-        """Helper method to delete child humidity sensor device (called on concurrent thread)."""
-        fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
-        if fan_dev and fan_dev.pluginProps.get(PROP_CHILD_HUMIDITY_SENSOR_ID) == sensor_id:
-            sensor_dev: Optional[indigo.Device] = indigo.devices.get(sensor_id)
-            if sensor_dev:
-                indigo.device.ungroupDevice(sensor_dev)
-                indigo.device.delete(sensor_dev)
-                self.logger.info(
-                    f"Removed child humidity sensor device {sensor_dev} for fan {fan_id}"
-                )
-
-            props = dict(fan_dev.pluginProps)
-            props.pop(PROP_CHILD_HUMIDITY_SENSOR_ID, None)
-            fan_dev.replacePluginPropsOnServer(props)
 
 
     def _update_fan_states(self, fan_dev: indigo.Device, baf_dev: BAFDevice) -> None:
@@ -1062,17 +968,26 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
 
     def _update_error_state(self, fan_id: DeviceId, state: Optional[str]) -> None:
-        """Updates the error state for the fan device (and light sub-device if applicable)"""
+        """Updates the error state for the fan device (and child devices if applicable)"""
         with self._lock:
             self.fan_availability[fan_id] = state is None
         fan = indigo.devices.get(fan_id)
         if fan:
             fan.setErrorStateOnServer(state)
-            light_id = fan.pluginProps.get(PROP_CHILD_LIGHT_ID)
-            if light_id:
-                light = indigo.devices.get(light_id)
-                if light:
-                    light.setErrorStateOnServer(state)
+            self._update_error_state_child_device(fan, PROP_CHILD_LIGHT_ID, state)
+            self._update_error_state_child_device(fan, PROP_CHILD_OCCUPANCY_SENSOR_ID, state)
+            self._update_error_state_child_device(fan, PROP_CHILD_TEMPERATURE_SENSOR_ID, state)
+            self._update_error_state_child_device(fan, PROP_CHILD_HUMIDITY_SENSOR_ID, state)
+
+
+    @staticmethod
+    def _update_error_state_child_device(dev: indigo.Device, child_device_property_key: str,
+                                         state: Optional[str]) -> None:
+        child_dev_id = dev.pluginProps.get(child_device_property_key)
+        if child_dev_id:
+            child_dev = indigo.devices.get(child_dev_id)
+            if child_dev:
+                child_dev.setErrorStateOnServer(state)
 
 
     def _update_error_state_for_service_id(self, service_id: ServiceId,
@@ -1092,7 +1007,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
 
     def _get_baf_instance(self, dev: indigo.Device) -> Optional[BAFDevice]:
-        """Helper to find the active connection for either a fan or light device."""
+        """Helper to find the active connection for either a fan or child device."""
         service_id = dev.address
         if service_id:
             with self._lock:
