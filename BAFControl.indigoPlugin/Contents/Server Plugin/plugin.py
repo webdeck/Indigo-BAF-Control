@@ -25,6 +25,8 @@ from device_discovery import BAFDeviceDiscoveryManager, ServiceId
 # Typing
 DeviceId = int
 DeviceMenuItem = tuple[ServiceId, str]
+DeviceCreateCallback = Callable[[DeviceId, str, ServiceId, BAFDevice], None]
+DeviceUpdateCallback = Callable[[indigo.Device, BAFDevice], None]
 
 # Device Types
 FAN_DEVICE_TYPE = "bafFan"
@@ -288,6 +290,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         if dev.deviceTypeId != FAN_DEVICE_TYPE:
             return
 
+        self.logger.debug(f"Starting device communication for device {dev.id}")
         service = self._get_service_from_config(dev.pluginProps)
         if service is None:
             self.logger.error(f"Failed to get device address for device {dev.id}")
@@ -341,6 +344,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
         if dev.deviceTypeId != FAN_DEVICE_TYPE:
             return
 
+        self.logger.debug(f"Stopping device communication for device {dev.id}")
         service_id = dev.address
         stop_service_connection = False
         with self._lock:
@@ -423,22 +427,24 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
     def _get_service_from_config(self, values_dict: dict) -> Optional[BAFService]:
         """Gets the Service object from the config, or None if invalid."""
         service: Optional[BAFService] = None
-        address = values_dict.get("address")
-        if address:
-            service = self.discovery_manager.create_service_from_id(address)
-        else:
-            service_id: Optional[ServiceId] = values_dict.get("selected_device")
-            if service_id == SERVICE_ID_MANUAL:
-                ip_address  = self._get_ip_address_from_config(values_dict)
-                port = self._get_port_from_config(values_dict)
-                if ip_address and port:
-                    service = BAFService([ip_address], port)
-                else:
-                    self.logger.error("Manual address and/or port configuration is invalid")
-            elif service_id:
-                service = self.discovery_manager.get_service_by_id(service_id)
-                if not service:
-                    self.logger.error(f"Unable to find selected device {service_id}")
+        service_id: Optional[ServiceId] = values_dict.get("selected_device")
+        if service_id == SERVICE_ID_MANUAL:
+            ip_address  = self._get_ip_address_from_config(values_dict)
+            port = self._get_port_from_config(values_dict)
+            if ip_address and port:
+                service = BAFService([ip_address], port)
+            else:
+                self.logger.error("Manual address and/or port configuration is invalid")
+        elif service_id:
+            service = self.discovery_manager.get_service_by_id(service_id)
+
+        if service is None:
+            address = values_dict.get("address")
+            if address:
+                service = self.discovery_manager.create_service_from_id(address)
+
+        if service is None:
+            self.logger.error(f"Unable to find selected device {service_id}")
 
         return service
 
@@ -537,10 +543,10 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
             for fan_id in fan_ids:
                 self._handle_baf_state_callback(baf_device, fan_id)
         else:
-            self.logger.debug(f"Unable to find fan_id for BAF device {baf_device.name}")
+            self.logger.debug(f"Unable to find Indigo device for BAF device {baf_device.name}")
 
 
-    def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:  # pylint: disable=too-many-statements,too-many-branches
+    def _handle_baf_state_callback(self, baf_device: BAFDevice, fan_id: DeviceId) -> None:
         """Handles callback for a specific BAF device with state updates"""
         try:
             fan_dev: Optional[indigo.Device] = indigo.devices.get(fan_id)
@@ -550,70 +556,54 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
 
             self._update_fan_states(fan_dev, baf_device)
 
-            # Handle child light device - create if necessary
-            light_id: Optional[DeviceId] = fan_dev.pluginProps.get(PROP_CHILD_LIGHT_ID)
-            if baf_device.has_light:
-                if light_id:
-                    light_dev: Optional[indigo.Device] = indigo.devices.get(light_id)
-                    if light_dev:
-                        self._update_light_states(light_dev, baf_device)
-                else:
-                    self.logger.debug(f"Queueing light creation for fan {fan_id}")
-                    self._add_device_operation(
-                        lambda: self._create_light(fan_id, fan_dev.name,
-                                                   fan_dev.address, baf_device)
-                    )
+            self._update_child_device(fan_dev, baf_device, PROP_CHILD_LIGHT_ID,
+                                      baf_device.has_light, self._create_light,
+                                      self._update_light_states)
 
-            # Handle child occupancy sensor device - create if necessary
-            occupancy_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
-                PROP_CHILD_OCCUPANCY_SENSOR_ID
-            )
-            if baf_device.has_occupancy:
-                if occupancy_sensor_id:
-                    sensor_dev: Optional[indigo.Device] = indigo.devices.get(occupancy_sensor_id)
-                    if sensor_dev:
-                        self._update_occupancy_sensor_states(sensor_dev, baf_device)
-                else:
-                    self.logger.debug(f"Queueing occupancy sensor creation for fan {fan_id}")
-                    self._add_device_operation(
-                        lambda: self._create_occupancy_sensor(fan_id, fan_dev.name,
-                                                              fan_dev.address, baf_device)
-                    )
+            self._update_child_device(fan_dev, baf_device, PROP_CHILD_OCCUPANCY_SENSOR_ID,
+                                      baf_device.has_occupancy, self._create_occupancy_sensor,
+                                      self._update_occupancy_sensor_states)
 
-            # Handle child temperature sensor device - create if necessary
-            temperature_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
-                PROP_CHILD_TEMPERATURE_SENSOR_ID
-            )
-            if baf_device.temperature is not None:
-                if temperature_sensor_id:
-                    sensor_dev: Optional[indigo.Device] = indigo.devices.get(temperature_sensor_id)
-                    if sensor_dev:
-                        self._update_temperature_sensor_states(sensor_dev, baf_device)
-                else:
-                    self.logger.debug(f"Queueing temperature sensor creation for fan {fan_id}")
-                    self._add_device_operation(
-                        lambda: self._create_temperature_sensor(fan_id, fan_dev.name,
-                                                                fan_dev.address, baf_device)
-                    )
+            self._update_child_device(fan_dev, baf_device, PROP_CHILD_TEMPERATURE_SENSOR_ID,
+                                      baf_device.temperature is not None,
+                                      self._create_temperature_sensor,
+                                      self._update_temperature_sensor_states)
 
-            # Handle child humidity sensor device - create if necessary
-            humidity_sensor_id: Optional[DeviceId] = fan_dev.pluginProps.get(
-                PROP_CHILD_HUMIDITY_SENSOR_ID
-            )
-            if baf_device.humidity is not None:
-                if humidity_sensor_id:
-                    sensor_dev: Optional[indigo.Device] = indigo.devices.get(humidity_sensor_id)
-                    if sensor_dev:
-                        self._update_humidity_sensor_states(sensor_dev, baf_device)
-                else:
-                    self.logger.debug(f"Queueing humidity sensor creation for fan {fan_id}")
-                    self._add_device_operation(
-                        lambda: self._create_humidity_sensor(fan_id, fan_dev.name,
-                                                             fan_dev.address, baf_device)
-                    )
+            self._update_child_device(fan_dev, baf_device, PROP_CHILD_HUMIDITY_SENSOR_ID,
+                                      baf_device.humidity is not None,
+                                      self._create_humidity_sensor,
+                                      self._update_humidity_sensor_states)
 
         except Exception as ex:  # pylint: disable=broad-exception-caught
             self.logger.exception(f"State callback error for fan {fan_id}: {ex}")
+
+
+    def _update_child_device(self, fan_dev: indigo.Device, baf_device: BAFDevice,  # pylint: disable=too-many-arguments,too-many-positional-arguments
+                             child_id_property_key: str, child_device_exists: bool,
+                             create_callback: DeviceCreateCallback,
+                             update_callback: DeviceUpdateCallback) -> None:
+        """Helper method to create/update a child device.  Child devices are never deleted."""
+        child_dev: Optional[indigo.Device] = None
+        child_id: Optional[DeviceId] = fan_dev.pluginProps.get(child_id_property_key)
+        if child_id:
+            child_dev = indigo.devices.get(child_id)
+            if child_dev:
+                self._update_device_available(child_dev, child_device_exists)
+
+        if child_device_exists:
+            if child_dev:
+                if child_dev.address != fan_dev.address:
+                    new_props = child_dev.pluginProps
+                    new_props["address"] = fan_dev.address
+                    self._add_device_operation(
+                        lambda: child_dev.replacePluginPropsOnServer(new_props)
+                    )
+                    update_callback(child_dev, baf_device)
+            else:
+                self.logger.debug(f"Queueing child device creation for fan {fan_dev.id}")
+                self._add_device_operation(
+                    lambda: create_callback(fan_dev.id, fan_dev.name, fan_dev.address, baf_device)
+                )
 
 
     def _create_light(self, fan_id: DeviceId, fan_name: str,
