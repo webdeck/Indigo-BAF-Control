@@ -598,7 +598,7 @@ class Plugin(indigo.PluginBase):  # pylint: disable=too-many-public-methods,too-
                     self._add_device_operation(
                         lambda: child_dev.replacePluginPropsOnServer(new_props)
                     )
-                    update_callback(child_dev, baf_device)
+                update_callback(child_dev, baf_device)
             else:
                 self.logger.debug(f"Queueing child device creation for fan {fan_dev.id}")
                 self._add_device_operation(
